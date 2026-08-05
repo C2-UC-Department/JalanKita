@@ -55,6 +55,7 @@
 				4EBA2FDF3021C3AE004B0D93 /* Sources */,
 				4EBA2FE03021C3AE004B0D93 /* Frameworks */,
 				4EBA2FE13021C3AE004B0D93 /* Resources */,
+				4EBA30013021C3AE004B0D93 /* Stage disturbance-worker */,
 			);
 			buildRules = (
 			);
@@ -114,6 +115,29 @@
 		};
 /* End PBXResourcesBuildPhase section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		4EBA30013021C3AE004B0D93 /* Stage disturbance-worker */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Stage disturbance-worker";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/disturbance-worker/disturbance-worker",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -e\nSRC=\"${SRCROOT}/../PythonWorker/dist/disturbance-worker/\"\nDEST=\"${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Resources/disturbance-worker/\"\n\nif [ ! -d \"$SRC\" ]; then\n  echo \"warning: PythonWorker/dist/disturbance-worker not found -- run PythonWorker/build_worker.sh first to bundle a real worker into the app. Skipping (Debug/dev builds fall back to PythonWorker/.venv instead, see InferenceService.resolveWorkerLaunch).\"\n  exit 0\nfi\n\nmkdir -p \"$DEST\"\nrsync -a --delete \"$SRC\" \"$DEST\"\necho \"staged disturbance-worker into $DEST\"\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		4EBA2FDF3021C3AE004B0D93 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -163,7 +187,7 @@
 				DEVELOPMENT_TEAM = S3AP74B5TH;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_DYNAMIC_NO_PIC = NO;
 				GCC_NO_COMMON_BLOCKS = YES;
@@ -227,7 +251,7 @@
 				DEVELOPMENT_TEAM = S3AP74B5TH;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_NO_COMMON_BLOCKS = YES;
 				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
@@ -250,6 +274,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = "JalanKita Mac/JalanKita Mac.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
@@ -282,6 +307,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = "JalanKita Mac/JalanKita Mac.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;

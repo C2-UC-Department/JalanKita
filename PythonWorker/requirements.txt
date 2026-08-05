@@ -1,0 +1,39 @@
+# Inference-only dependencies for `python -m src.disturbance --serve`.
+#
+# This is a trimmed copy of AmodalRoadSegmentation/requirements.txt: no
+# streamlit/pandas (interactive app only), no scipy/pytest (training/test
+# only). Kept in sync by hand when PythonWorker/src is re-synced from the
+# source repo — see README.md.
+
+numpy>=1.26,<2.1
+pillow>=10.0
+opencv-python>=4.9
+tqdm>=4.66
+# Not imported anywhere in src/ directly -- transformers' Mask2Former model
+# class unconditionally constructs a loss module that requires scipy even at
+# inference time (Hungarian matching), so this is a real runtime dependency,
+# discovered the hard way via a worker_main.py smoke test.
+scipy>=1.11
+
+# Deep learning (Mask2Former + Depth-Anything-V2 via HuggingFace, downloaded
+# and cached on first run -- see InferenceService's first-run download flow).
+# On Apple Silicon these wheels ship with MPS (Metal) support out of the box.
+torch>=2.2
+torchvision>=0.17
+transformers>=4.40
+accelerate>=0.29
+
+# Frozen-executable packaging (Phase 1) -- not a runtime dependency of the
+# worker itself, only needed to run build_worker.sh.
+pyinstaller>=6.10
+
+# --- Optional: single-image camera calibration -----------------------------
+# GeoCalib (ECCV 2024) estimates focal length AND gravity direction from one
+# image. Without it the pipeline falls back to EXIF and then to a blind FOV
+# assumption, which on real phone footage misestimates the focal length by
+# 35-45% and shears the reconstructed 3D geometry. Not on PyPI, so install
+# from git if you want it:
+#     pip install "git+https://github.com/cvg/GeoCalib.git"
+# Code Apache-2.0, pretrained weights CC-BY-4.0. Everything degrades
+# gracefully if it is absent (see src/calibration.py). Not bundled into the
+# frozen worker by default -- see README.md.

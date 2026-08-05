@@ -51,25 +51,24 @@ enum SampleData {
 
     static let queue: [Session] = [sessions[3], sessions[0], sessions[1]]
 
+    /// The parking-disturbance pipeline's own stages (src/disturbance.py
+    /// `analyze()`), not the video/GPS pipeline the design brief describes —
+    /// this integration takes a single uploaded photo, not a recorded drive.
+    /// `.waiting` at rest; AppModel.applyProgress drives state/detail live
+    /// from the worker's stderr progress events during `uploadImage(url:)`.
     static let pipelineSteps: [PipelineStep] = [
-        PipelineStep(id: 1, title: "Ekstraksi frame", state: .done,
-                     detail: "selesai dalam 6 m 12 d",
-                     stats: "7.925 frame @ 1 fps · −612 blur (Laplacian) · −421 duplikat (dHash) · 6.892 dipakai"),
-        PipelineStep(id: 2, title: "Penggabungan jejak GPS", state: .done,
-                     detail: "selesai dalam 11 d",
-                     stats: "7.930 titik · 1 Hz · interpolasi waktu dinding · 6.892 / 6.892 frame tergabung",
-                     warning: nil),
-        PipelineStep(id: 3, title: "Segmentasi kerusakan jalan", state: .active,
-                     detail: "berjalan · 2.894 / 6.892 frame",
-                     stats: "segmenter v3 · 2 kelas · gerbang mask jalan aktif · 1.204 frame berisi kerusakan",
-                     warning: "Segmenter hanya punya kelas retak dan lubang. Retak kulit buaya akan dinilai sebagai retak biasa sampai model tiga kelas tersedia — pengurang 15 poin tidak diklaim.",
-                     subProgress: 0.42),
-        PipelineStep(id: 4, title: "Deteksi parkir mengganggu", state: .waiting,
+        PipelineStep(id: 1, title: "Segmentasi semantik jalan", state: .waiting,
                      detail: "menunggu",
-                     stats: "detektor kendaraan + mask carriageway · ambang keyakinan 0.55"),
-        PipelineStep(id: 5, title: "Penilaian keparahan & binning 10 m", state: .waiting,
+                     stats: "Mask2Former (jalan terlihat) + OFRSNet (patch jalan amodal)"),
+        PipelineStep(id: 2, title: "Deteksi instans kendaraan", state: .waiting,
                      detail: "menunggu",
-                     stats: "tabel pengurangan PCI-informed · skala: Dudukan C terkalibrasi · ± 3.180 segmen"),
+                     stats: "model instans kendaraan, dengan fallback komponen-terhubung (blob) untuk dukungan yang tak terdeteksi"),
+        PipelineStep(id: 3, title: "Estimasi bidang tanah & tinggi kamera", state: .waiting,
+                     detail: "menunggu",
+                     stats: "RANSAC pada depth monokuler · skala metrik otomatis dari tinggi atap kendaraan terdeteksi"),
+        PipelineStep(id: 4, title: "Rasterisasi BEV & atribusi", state: .waiting,
+                     detail: "menunggu",
+                     stats: "proyeksi top-down · jejak kontak-tanah tiap kendaraan · atribusi area jalan tersembunyi per kendaraan"),
     ]
 
     static let gpsJoinNote = "Log GPS dimulai 4 detik sebelum video dan berakhir 9 detik sesudah — tidak ada frame yang perlu dijepit ke ujung jejak."

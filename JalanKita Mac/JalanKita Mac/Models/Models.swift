@@ -95,6 +95,12 @@ struct ReviewFrame: Identifiable, Hashable {
     let findings: [Finding]
     let startScore: Int
     let deductions: [SeverityDeduction]
+
+    /// The photo this frame's findings were computed on. `nil` (the
+    /// DummySegmentation default) means "show the bundled ReviewSampleFrame
+    /// asset" — FrameCanvasView falls back to that exactly as before; a real
+    /// upload sets this so the canvas shows the actual analyzed photo.
+    var imageURL: URL? = nil
 }
 
 /// One 10-metre road segment as reported back by the pipeline — the
