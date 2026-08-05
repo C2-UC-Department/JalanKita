@@ -77,7 +77,9 @@ struct SeverityDeduction: Identifiable, Hashable {
     let points: Int
 }
 
-/// A reviewed frame: the unit of work on the Peninjauan Temuan screen.
+/// A reviewed frame: the unit of work on the Peninjauan Temuan screen. Purely
+/// DummySegmentation-driven (road-damage findings only) — real
+/// parking-disturbance results go to ParkingAnalysis/"Tinjauan Parkir" instead.
 struct ReviewFrame: Identifiable, Hashable {
     let id: String
     let roadName: String
@@ -95,12 +97,29 @@ struct ReviewFrame: Identifiable, Hashable {
     let findings: [Finding]
     let startScore: Int
     let deductions: [SeverityDeduction]
+}
 
-    /// The photo this frame's findings were computed on. `nil` (the
-    /// DummySegmentation default) means "show the bundled ReviewSampleFrame
-    /// asset" — FrameCanvasView falls back to that exactly as before; a real
-    /// upload sets this so the canvas shows the actual analyzed photo.
-    var imageURL: URL? = nil
+/// One session's real parking-disturbance analysis — the "Tinjauan Parkir"
+/// screen's unit of work. `bevPNGPath` is `var`: `AppModel.selectParkingVehicle`
+/// updates it in place each time the user taps a different vehicle overlay,
+/// re-rendering the BEV panel with that vehicle's share highlighted.
+struct ParkingAnalysis: Identifiable {
+    let sessionID: Session.ID
+    let imageURL: URL
+    let imageWidth: Int
+    let imageHeight: Int
+    let summary: DisturbanceSummary
+    var bevPNGPath: String?
+
+    var id: Session.ID { sessionID }
+
+    /// Vehicles with a measurable share, ranked by area descending —
+    /// mirrors `src/disturbance.py`'s own `_print_report` ranking.
+    var rankedVehicles: [VehicleSummary] {
+        summary.vehicles
+            .filter { ($0.areaM2 ?? 0) > 0 }
+            .sorted { ($0.areaM2 ?? 0) > ($1.areaM2 ?? 0) }
+    }
 }
 
 /// One 10-metre road segment as reported back by the pipeline — the

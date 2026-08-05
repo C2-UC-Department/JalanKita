@@ -5,10 +5,10 @@
 //  App-facing entry point for the parking-disturbance pipeline. Owns the
 //  lazily-launched, kept-warm InferenceWorkerProcess and turns its raw
 //  NDJSON responses into the one thing AppModel actually wants: an
-//  AnalysisResult ready for FindingMapper. Everything actor-isolated lives
-//  in InferenceWorkerProcess; this type is @MainActor because its only two
-//  jobs — being called from AppModel and forwarding progress back to it —
-//  both belong on the main actor.
+//  AnalysisResult ready for ParkingMetrics/the Tinjauan Parkir screen.
+//  Everything actor-isolated lives in InferenceWorkerProcess; this type is
+//  @MainActor because its jobs — being called from AppModel and forwarding
+//  progress back to it — both belong on the main actor.
 //
 
 import Foundation
@@ -37,10 +37,14 @@ final class InferenceService {
 
     private init() {}
 
+    /// `requestID` doubles as the analysis's cache key on the worker side
+    /// (`serve_worker`'s `result_cache`) — callers that want to later
+    /// re-render the BEV for a different vehicle (`renderBEV`) should pass a
+    /// stable id they can remember, e.g. AppModel passes the session id.
     func analyze(imagePath: URL, requestID: String = UUID().uuidString) async throws -> AnalysisResult {
         let worker = try await ensureStarted()
         let request = WorkerRequest(id: requestID, imagePath: imagePath.path)
-        let response = try await worker.send(request)
+        let response = try await worker.send(request, id: requestID)
 
         guard response.ok, let summary = response.summary,
               let width = response.imageWidth, let height = response.imageHeight else {
@@ -49,6 +53,25 @@ final class InferenceService {
         }
         return AnalysisResult(summary: summary, imageWidth: width, imageHeight: height,
                               candidatesPNGPath: response.candidatesPNG, bevPNGPath: response.bevPNG)
+    }
+
+    /// Re-renders the BEV panel highlighting `vehicleID`'s share (`nil` for
+    /// no highlight), for an image already analyzed via `analyze(requestID:)`
+    /// in this same worker process. Throws `InferenceWorkerError.requestFailed`
+    /// if the worker no longer has that analysis cached (evicted, or the
+    /// worker restarted since) — callers should keep showing the last
+    /// successfully rendered BEV rather than treat this as fatal.
+    func renderBEV(analysisID: String, vehicleID: Int?) async throws -> String {
+        let worker = try await ensureStarted()
+        let requestID = UUID().uuidString
+        let request = RenderBEVRequest(id: requestID, analysisID: analysisID, vehicleID: vehicleID)
+        let response = try await worker.send(request, id: requestID)
+
+        guard response.ok, let bevPNG = response.bevPNG else {
+            throw InferenceWorkerError.requestFailed(
+                response.error ?? "Render ulang BEV gagal tanpa pesan kesalahan.")
+        }
+        return bevPNG
     }
 
     /// Terminates the child process, if any — call on app termination so no

@@ -51,6 +51,7 @@ struct SidebarView: View {
         case .sessionInbox: model.batchSelectedCount
         case .queue: model.queuedSessions.count
         case .review: model.unreviewedFindingsCount
+        case .parkingReview: model.parkingReviewSessions.count
         case .surveyors: model.surveyorCount
         case .mapSegments, .reports, .calibration: 0
         }

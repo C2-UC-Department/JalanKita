@@ -18,8 +18,9 @@
 //  pipeline (InferenceService -> src/disturbance.py's `--serve` worker). It
 //  deliberately mirrors SessionInboxView.processBatch()'s existing pattern
 //  (flip a Session's status, then set `selection`) rather than inventing a
-//  second navigation mechanism — see the integration plan's "Concrete UI
-//  wiring" section.
+//  second navigation mechanism. On success it lands on "Tinjauan Parkir"
+//  (parkingAnalyses), never Peninjauan (reviewFrame) — that screen stays
+//  purely DummySegmentation-driven, untouched by real uploads.
 //
 
 import Foundation
@@ -32,10 +33,14 @@ final class AppModel {
     var sessions: [Session] = SampleData.sessions
     var segments: [SegmentResult] = SampleData.segments
 
-    /// Randomized each launch — see DummySegmentation.swift. Stands in
-    /// for real model output until a real photo has been analyzed; after
-    /// `uploadImage(url:)` completes, this holds the real result instead.
+    /// Randomized each launch — see DummySegmentation.swift. Peninjauan's
+    /// road-damage findings are entirely dummy; real uploads never touch this.
     var reviewFrame: ReviewFrame = DummySegmentation.makeReviewFrame()
+
+    /// Real parking-disturbance results, keyed by session id — "Tinjauan
+    /// Parkir"'s data. `var` values (not `let`) so `selectParkingVehicle` can
+    /// update `bevPNGPath` in place after each re-render.
+    var parkingAnalyses: [Session.ID: ParkingAnalysis] = [:]
 
     /// `var`, not `let` — SampleData.pipelineSteps is the at-rest/default
     /// state; `uploadImage(url:)` resets to it per run and then drives it
@@ -74,6 +79,13 @@ final class AppModel {
 
     var surveyorCount: Int {
         Set(sessions.map(\.surveyor.id)).count
+    }
+
+    /// Sessions with a real stored analysis — not `status == .done` broadly,
+    /// since SampleData's dummy "done" video sessions have no ParkingAnalysis
+    /// and would show up as broken empty rows in Tinjauan Parkir otherwise.
+    var parkingReviewSessions: [Session] {
+        sessions.filter { parkingAnalyses[$0.id] != nil }
     }
 
     func toggleBatchSelection(for sessionID: Session.ID) {
@@ -118,44 +130,42 @@ final class AppModel {
 
     private func runAnalysis(sessionID: String, imageURL: URL) async {
         do {
-            let result = try await inferenceService.analyze(imagePath: imageURL)
+            // requestID == sessionID: doubles as the worker's result_cache key,
+            // so selectParkingVehicle can re-render this analysis's BEV later.
+            let result = try await inferenceService.analyze(imagePath: imageURL, requestID: sessionID)
             activeUploadSessionID = nil
             updateSessionStatus(sessionID, .done)
 
-            // The other defect system (potholes/cracking) stays fully dummy —
-            // only blockedPark findings come from the real pipeline. This is
-            // the concrete form of "two systems coexist by defect type."
-            let realFindings = FindingMapper.findings(from: result)
-            let dummyFindings = DummySegmentation.randomFindings()
-                .filter { $0.defectType != .blockedPark }
-            let allFindings = realFindings + dummyFindings
-            let (score, deductions) = DummySegmentation.severityBreakdown(for: allFindings)
-
-            reviewFrame = ReviewFrame(
-                id: sessionID,
-                roadName: imageURL.deletingPathExtension().lastPathComponent,
-                indexInQueue: 1,
-                totalInQueue: 1,
-                frameNumber: "000001",
-                timecode: "00:00:00",
-                severity: Severity(score: score),
-                score: score,
-                isProvisional: true,
-                segmentLabel: "Unggahan",
-                kmMarker: "—",
-                coordinate: "—",
-                gpsAccuracyM: 0,
-                findings: allFindings,
-                startScore: 100,
-                deductions: deductions,
-                imageURL: imageURL
+            parkingAnalyses[sessionID] = ParkingAnalysis(
+                sessionID: sessionID,
+                imageURL: imageURL,
+                imageWidth: result.imageWidth,
+                imageHeight: result.imageHeight,
+                summary: result.summary,
+                bevPNGPath: result.bevPNGPath
             )
-            selection = .review
+            selection = .parkingReview
         } catch {
             activeUploadSessionID = nil
             updateSessionStatus(sessionID, .failed(reason: error.localizedDescription))
             logLines.insert(LogLine(time: Self.logTimeFormatter.string(from: Date()),
                                     message: "Analisis gagal: \(error.localizedDescription)",
+                                    isWarning: true), at: 0)
+        }
+    }
+
+    /// Called when the user taps a different vehicle overlay in Tinjauan
+    /// Parkir: re-renders the BEV highlighting that vehicle's share. Leaves
+    /// the existing `bevPNGPath` in place on failure (e.g. the worker evicted
+    /// this analysis from its cache) rather than breaking the panel.
+    func selectParkingVehicle(sessionID: Session.ID, vehicleID: Int?) async {
+        guard parkingAnalyses[sessionID] != nil else { return }
+        do {
+            let bevPath = try await inferenceService.renderBEV(analysisID: sessionID, vehicleID: vehicleID)
+            parkingAnalyses[sessionID]?.bevPNGPath = bevPath
+        } catch {
+            logLines.insert(LogLine(time: Self.logTimeFormatter.string(from: Date()),
+                                    message: "Render ulang BEV gagal: \(error.localizedDescription)",
                                     isWarning: true), at: 0)
         }
     }

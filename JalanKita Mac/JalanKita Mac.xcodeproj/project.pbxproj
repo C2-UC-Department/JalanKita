@@ -118,6 +118,7 @@
 /* Begin PBXShellScriptBuildPhase section */
 		4EBA30013021C3AE004B0D93 /* Stage disturbance-worker */ = {
 			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
 			files = (
 			);

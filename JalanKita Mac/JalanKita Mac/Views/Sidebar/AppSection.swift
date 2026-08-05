@@ -9,6 +9,7 @@ enum AppSection: String, Identifiable, Hashable {
     case sessionInbox
     case queue
     case review
+    case parkingReview
     case mapSegments
     case reports
     case surveyors
@@ -21,6 +22,7 @@ enum AppSection: String, Identifiable, Hashable {
         case .sessionInbox: "Sesi masuk"
         case .queue: "Antrean"
         case .review: "Peninjauan"
+        case .parkingReview: "Tinjauan Parkir"
         case .mapSegments: "Peta & segmen"
         case .reports: "Laporan"
         case .surveyors: "Surveyor"
@@ -33,6 +35,7 @@ enum AppSection: String, Identifiable, Hashable {
         case .sessionInbox: "tray.full.fill"
         case .queue: "clock.fill"
         case .review: "checkmark.magnifyingglass"
+        case .parkingReview: "parkingsign.circle.fill"
         case .mapSegments: "map.fill"
         case .reports: "doc.text.fill"
         case .surveyors: "person.2.fill"
@@ -49,7 +52,7 @@ enum AppSection: String, Identifiable, Hashable {
     }
 
     static let groups: [(Group, [AppSection])] = [
-        (.pemrosesan, [.sessionInbox, .queue, .review]),
+        (.pemrosesan, [.sessionInbox, .queue, .review, .parkingReview]),
         (.hasil, [.mapSegments, .reports]),
         (.lapangan, [.surveyors, .calibration]),
     ]

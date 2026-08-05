@@ -2,20 +2,20 @@
 //  FrameCanvasView.swift
 //  JalanKita Mac
 //
-//  The background is either the bundled sample photo (ReviewSampleFrame, aka
-//  IMG_0885 — a real frame from the illegal-parking dataset, Appendix A.7)
-//  when `frame.imageURL` is nil (DummySegmentation's default), or the actual
-//  uploaded photo InferenceService just analyzed. The canvas locks its
-//  aspect ratio to whichever image is showing rather than assuming a fixed
-//  ratio, so the image is never letterboxed and the findings' normalized
-//  rects always land on the actual pixels they describe.
+//  The background is the bundled sample photo (ReviewSampleFrame, aka
+//  IMG_0885 — a real frame from the illegal-parking dataset, Appendix
+//  A.7). The canvas locks its aspect ratio to the photo's own 3:4
+//  portrait ratio rather than assuming a 16:9 dashcam frame, so the
+//  image is never letterboxed and the findings' normalized rects always
+//  land on the actual pixels they describe. Finding geometry and overlay
+//  interaction are what this pass needs to get right; real video frames
+//  will replace the still photo later.
 //
 
 import SwiftUI
 
 struct FrameCanvasView: View {
-    /// Width ÷ height of the bundled ReviewSampleFrame asset (3024 × 4032
-    /// px) — the fallback whenever `frame.imageURL` is nil.
+    /// Width ÷ height of ReviewSampleFrame (3024 × 4032 px).
     static let sampleFrameAspectRatio: CGFloat = 3024.0 / 4032.0
 
     let frame: ReviewFrame
@@ -23,24 +23,10 @@ struct FrameCanvasView: View {
     let boxActive: Bool
     @Binding var selectedFindingID: String?
 
-    @State private var loadedImage: NSImage?
-
-    private var aspectRatio: CGFloat {
-        guard let size = loadedImage?.size, size.height > 0 else { return Self.sampleFrameAspectRatio }
-        return size.width / size.height
-    }
-
-    private var background: Image {
-        if let loadedImage {
-            return Image(nsImage: loadedImage)
-        }
-        return Image("ReviewSampleFrame")
-    }
-
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .topLeading) {
-                background
+                Image("ReviewSampleFrame")
                     .resizable()
                     .aspectRatio(contentMode: .fill)
                     .frame(width: geo.size.width, height: geo.size.height)
@@ -69,12 +55,9 @@ struct FrameCanvasView: View {
                     .padding(14)
             }
         }
-        .aspectRatio(aspectRatio, contentMode: .fit)
+        .aspectRatio(Self.sampleFrameAspectRatio, contentMode: .fit)
         .clipShape(RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.1)))
-        .task(id: frame.imageURL) {
-            loadedImage = frame.imageURL.flatMap { NSImage(contentsOf: $0) }
-        }
     }
 }
 

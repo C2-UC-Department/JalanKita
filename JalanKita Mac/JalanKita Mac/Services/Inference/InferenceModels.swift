@@ -19,7 +19,7 @@
 import CoreGraphics
 import Foundation
 
-/// One line written to the worker's stdin.
+/// One line written to the worker's stdin, requesting a full `analyze()` run.
 struct WorkerRequest: Encodable {
     var id: String
     var imagePath: String
@@ -32,7 +32,7 @@ struct WorkerRequest: Encodable {
     var noAutoHeight: Bool?
 
     enum CodingKeys: String, CodingKey {
-        case id
+        case id, type
         case imagePath = "image_path"
         case cameraHeightM = "camera_height_m"
         case threshold
@@ -50,6 +50,7 @@ struct WorkerRequest: Encodable {
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(id, forKey: .id)
+        try c.encode("analyze", forKey: .type)
         try c.encode(imagePath, forKey: .imagePath)
         try c.encodeIfPresent(cameraHeightM, forKey: .cameraHeightM)
         try c.encodeIfPresent(threshold, forKey: .threshold)
@@ -58,6 +59,30 @@ struct WorkerRequest: Encodable {
         try c.encodeIfPresent(maxM2PerPx, forKey: .maxM2PerPx)
         try c.encodeIfPresent(noHeightPrior, forKey: .noHeightPrior)
         try c.encodeIfPresent(noAutoHeight, forKey: .noAutoHeight)
+    }
+}
+
+/// One line written to the worker's stdin, requesting a BEV re-render for a
+/// different vehicle selection on an image already analyzed in this worker
+/// process — see `serve_worker`'s `result_cache` (src/disturbance.py). Used
+/// by the "Tinjauan Parkir" screen when the user taps a different vehicle.
+struct RenderBEVRequest: Encodable {
+    var id: String
+    var analysisID: String
+    var vehicleID: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case id, type
+        case analysisID = "analysis_id"
+        case vehicleID = "vehicle_id"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode("render_bev", forKey: .type)
+        try c.encode(analysisID, forKey: .analysisID)
+        try c.encodeIfPresent(vehicleID, forKey: .vehicleID)
     }
 }
 
@@ -111,11 +136,18 @@ struct ScaleInfo: Decodable {
     let mode: String
     let cameraHeightM: Double?
     let impliedCameraHeightM: Double?
+    /// Both present only when `mode == "auto_vehicle_height"` — how many
+    /// qualifying cars the automatic camera-height estimate was based on,
+    /// and how much they disagreed (fraction of the median).
+    let nSamples: Int?
+    let kSpread: Double?
 
     enum CodingKeys: String, CodingKey {
         case mode
         case cameraHeightM = "camera_height_m"
         case impliedCameraHeightM = "implied_camera_height_m"
+        case nSamples = "n_samples"
+        case kSpread = "k_spread"
     }
 }
 
@@ -168,7 +200,7 @@ struct AreaMeasure: Decodable {
 /// `render_candidates`'s overlay). `areaM2` is nil only in the pathological
 /// case where `analyze()` returned before BEV attribution ran at all
 /// (`summary.ok == false`) — a vehicle with zero attributed area still gets
-/// a real `0.0`, not nil, and FindingMapper filters those out.
+/// a real `0.0`, not nil.
 struct VehicleSummary: Decodable {
     let id: Int
     let label: String
@@ -177,10 +209,22 @@ struct VehicleSummary: Decodable {
     let selectable: Bool
     let bbox: [Int]
     let areaM2: Double?
+    /// Straight from monocular depth's own scale, uncorrected by the
+    /// camera-height prior — shown alongside `areaM2` since the calibrated
+    /// figure depends on an assumption this one doesn't inherit (it inherits
+    /// the depth model's scale error instead).
+    let areaM2Raw: Double?
+    /// This vehicle's single worst along-road cross-section, as a percent of
+    /// the road's width there — a full-width blockage on a narrow road and a
+    /// small patch on a wide one can have the same area but very different
+    /// real-world consequences; this captures the one area alone doesn't.
+    let widthMaxPct: Double?
 
     enum CodingKeys: String, CodingKey {
         case id, label, score, source, selectable, bbox
         case areaM2 = "area_m2"
+        case areaM2Raw = "area_m2_raw"
+        case widthMaxPct = "width_max_pct"
     }
 
     /// Image-space pixel bbox `[u0, v0, u1, v1]` (exclusive upper) as a CGRect.

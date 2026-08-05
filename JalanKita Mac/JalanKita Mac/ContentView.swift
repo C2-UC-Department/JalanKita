@@ -63,6 +63,8 @@ struct ContentView: View {
             ProcessingQueueView(model: model)
         case .review:
             ReviewFindingsView(model: model)
+        case .parkingReview:
+            ParkingReviewView(model: model)
         case .mapSegments:
             MapSegmentsView(model: model)
         case .reports, .surveyors, .calibration:

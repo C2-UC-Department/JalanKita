@@ -637,13 +637,22 @@ def serve_worker(ckpt: str | None = None, use_instance_model: bool = True,
     bundled subprocess talks to; the CLI's one-shot `--input ... --json` mode
     (`main`, below) is unaffected and keeps working exactly as before.
 
-    Request line:  {"id": str, "image_path": str, "camera_height_m"?: float,
+    Request line (type "analyze", the default when "type" is omitted):
+                   {"id": str, "image_path": str, "camera_height_m"?: float,
                     "threshold"?: float, "min_score"?: float, "ppm"?: float,
                     "max_m2_per_px"?: float, "no_height_prior"?: bool,
                     "no_auto_height"?: bool}
-    Response line: {"id": str, "ok": bool, "summary"?: dict, "image_width"?: int,
+    Response:      {"id": str, "ok": bool, "summary"?: dict, "image_width"?: int,
                     "image_height"?: int, "candidates_png"?: str, "bev_png"?: str|null,
                     "error"?: str}
+
+    Request line (type "render_bev" -- re-render the BEV panel for a different
+    vehicle selection on an image this worker already analyzed, without
+    re-running the pipeline; used when a client lets the user browse vehicles
+    after the fact, e.g. JalanKita Mac's "Tinjauan Parkir" screen):
+                   {"id": str, "type": "render_bev", "analysis_id": str,
+                    "vehicle_id"?: int}
+    Response:      {"id": str, "ok": bool, "bev_png"?: str, "error"?: str}
     """
     out_dir = Path(out_dir) if out_dir else config.DATA_DIR / "disturbance" / "worker"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -656,6 +665,14 @@ def serve_worker(ckpt: str | None = None, use_instance_model: bool = True,
     grid = bev.BevGrid.from_config()
     _emit({"type": "ready"})
 
+    # Keyed by the analyzing request's own id (JalanKita Mac uses its session
+    # id), so a later "render_bev" request can look the result back up without
+    # re-running analyze(). A DisturbanceResult holds several full-resolution
+    # numpy arrays, so this is capped and evicts the oldest entry rather than
+    # growing unboundedly across a long-lived worker process.
+    result_cache: dict[str, DisturbanceResult] = {}
+    RESULT_CACHE_MAX = 5
+
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -667,9 +684,25 @@ def serve_worker(ckpt: str | None = None, use_instance_model: bool = True,
             continue
 
         req_id = req.get("id", "")
+        req_type = req.get("type", "analyze")
 
         def _progress(stage: str, state: str, _req_id: str = req_id) -> None:
             _emit({"type": "progress", "id": _req_id, "stage": stage, "state": state})
+
+        if req_type == "render_bev":
+            try:
+                result = result_cache[req["analysis_id"]]
+                vehicle_id = req.get("vehicle_id")
+                bev_path = out_dir / f"{req['analysis_id']}_bev_v{vehicle_id if vehicle_id is not None else 'all'}.png"
+                Image.fromarray(render_bev(result, vehicle_id)).save(bev_path)
+                response = {"id": req_id, "ok": True, "bev_png": str(bev_path)}
+            except KeyError:
+                response = {"id": req_id, "ok": False,
+                           "error": "analysis tidak lagi tersedia di worker -- unggah ulang fotonya."}
+            except Exception as e:  # one bad request must not kill a warm worker
+                response = {"id": req_id, "ok": False, "error": f"{type(e).__name__}: {e}"}
+            print(json.dumps(response), flush=True)
+            continue
 
         try:
             image_path = Path(req["image_path"])
@@ -698,6 +731,11 @@ def serve_worker(ckpt: str | None = None, use_instance_model: bool = True,
                 bev_path = out_dir / f"{stem}_bev.png"
                 Image.fromarray(render_bev(result)).save(bev_path)
             _progress("render", "done")
+
+            if result.ok:
+                result_cache[req_id] = result
+                if len(result_cache) > RESULT_CACHE_MAX:
+                    result_cache.pop(next(iter(result_cache)))
 
             response = {
                 "id": req_id,

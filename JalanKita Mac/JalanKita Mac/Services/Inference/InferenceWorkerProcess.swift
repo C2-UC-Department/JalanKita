@@ -126,9 +126,12 @@ actor InferenceWorkerProcess {
         startStderrPump(stderrReader)
     }
 
-    /// Sends one request and awaits its matching response. Throws if the
-    /// worker isn't running (call `start()` first) or exits mid-request.
-    func send(_ request: WorkerRequest) async throws -> WorkerResponse {
+    /// Sends one request and awaits its matching response, routed by `id`
+    /// (the caller's own request `id` field — passed separately rather than
+    /// read back off `request` so this works for any Encodable request shape
+    /// the protocol grows, e.g. `WorkerRequest`/`RenderBEVRequest`). Throws
+    /// if the worker isn't running (call `start()` first) or exits mid-request.
+    func send<Request: Encodable>(_ request: Request, id: String) async throws -> WorkerResponse {
         guard let stdinHandle, isRunning else {
             throw InferenceWorkerError.workerTerminated(status: process?.terminationStatus ?? -1)
         }
@@ -138,11 +141,11 @@ actor InferenceWorkerProcess {
         line.append(0x0A) // '\n'
 
         return try await withCheckedThrowingContinuation { continuation in
-            pending[request.id] = continuation
+            pending[id] = continuation
             do {
                 try stdinHandle.write(contentsOf: line)
             } catch {
-                pending.removeValue(forKey: request.id)
+                pending.removeValue(forKey: id)
                 continuation.resume(throwing: InferenceWorkerError.launchFailed(error.localizedDescription))
             }
         }
