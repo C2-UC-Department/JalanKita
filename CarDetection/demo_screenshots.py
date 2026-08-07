@@ -38,8 +38,8 @@ def _draw_bold_label(img, x, y, text, color, font_scale=0.7, thickness=2):
     cv2.putText(img, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness, cv2.LINE_AA)
 
 
-def write_screenshots(input_video, output_video, frame_cache, candidate_frame_box, demo_candidates,
-                      out_dir=None):
+def write_screenshots(input_video, output_video, frame_cache, pristine_frame_cache, candidate_frame_box,
+                      demo_candidates, out_dir=None):
     """
     demo_candidates: list of (track_id, stop_class, in_zone, depth_txt, mid_frame_idx, mid_seconds)
     -- mid_frame_idx/mid_seconds is the MIDDLE of the track's observed span (farthest-to-nearest),
@@ -51,13 +51,16 @@ def write_screenshots(input_video, output_video, frame_cache, candidate_frame_bo
     directory here so the Swift side has a predictable path to read from). Defaults to this
     repo's own demo/screenshots/<video>/ for standalone CLI use.
 
-    Writes TWO images per candidate: an annotated one (box + label burned in, for human review --
-    unchanged from before) and a CLEAN one (no overlay at all). The clean one exists because
-    OFRSNet (JalanKita's disturbance model) reads this same frame with its own Mask2Former/
-    Depth-Anything segmentation -- a solid burned-in box + text is a much stronger artifact than
-    the 15% road-overlay tint that was found to corrupt this project's own depth model (see
-    docs/CHANGELOG_V12_TO_V13.md), sitting right at the vehicle boundary that OFRSNet's per-vehicle
-    attribution most needs to read cleanly. Never hand OFRSNet the annotated version.
+    Writes TWO images per candidate: an annotated one (box + label burned in, for human review,
+    built on top of frame_cache's fully-processed frame -- road tint, corridor, sign zones, legend,
+    the works) and a CLEAN one built from pristine_frame_cache instead -- the frame as decoded from
+    the source video, before ANY pipeline overlay, not just before the candidate's own box. OFRSNet
+    (JalanKita's disturbance model) reads this same frame with its own Mask2Former/Depth-Anything
+    segmentation; an earlier version of this function only stripped the box+label and left
+    draw_road_overlay's 15% green tint baked in across the entire road surface -- exactly the
+    region OFRSNet measures -- which is the same contamination class pipeline_v13.py's own
+    gray/depth ordering fix already had to work around for internal optical flow/depth (see the
+    NOTE in pipeline_v13.py's main loop). Never hand OFRSNet anything but pristine_frame_cache.
     """
     video_name = os.path.splitext(os.path.basename(input_video))[0]
     if out_dir is None:
@@ -67,11 +70,12 @@ def write_screenshots(input_video, output_video, frame_cache, candidate_frame_bo
     summary = []
     for track_id, stop_class, in_zone, depth_txt, mid_frame_idx, mid_seconds in demo_candidates:
         raw = frame_cache.get(mid_frame_idx)
+        raw_clean = pristine_frame_cache.get(mid_frame_idx)
         box = candidate_frame_box.get(track_id)
-        if raw is None or box is None:
+        if raw is None or raw_clean is None or box is None:
             continue
-        clean_img = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
-        img = clean_img.copy()
+        img = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
+        clean_img = cv2.imdecode(np.frombuffer(raw_clean, dtype=np.uint8), cv2.IMREAD_COLOR)
         x1, y1, x2, y2 = box
         color = COLOR_DISTURBANCE if in_zone else COLOR_PARKED
         cv2.rectangle(img, (x1, y1), (x2, y2), color, 3)

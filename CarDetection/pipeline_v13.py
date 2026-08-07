@@ -245,6 +245,14 @@ def main():
     prev_depth = prev_scale = prev_any_mover = None
 
     frame_cache = {}
+    # Truly pristine per-frame snapshot -- taken below right after gray/depth are derived and
+    # BEFORE draw_road_overlay (or anything else) mutates `frame`. frame_cache, by contrast, is
+    # cached at the very end of the loop and therefore carries every pipeline overlay (road tint,
+    # corridor, sign zones, legend, timestamp). demo_screenshots.py's "_clean.jpg" used to be
+    # sourced from frame_cache too -- same 15% green road-tint contamination this file's own
+    # gray/depth ordering fix (see NOTE below) already worked around for internal optical
+    # flow/depth, just never carried through to what OFRSNet actually gets handed.
+    pristine_frame_cache = {}
     car_draw_by_frame = defaultdict(list)
     # NEW: every (frame_idx, box) a track was seen at, for the demo screenshot generator -- lets it
     # pick the MIDDLE frame of a track's observed span (farthest-to-nearest) once first_frame/
@@ -279,6 +287,10 @@ def main():
         # to the user separately since fixing it would change historical results project-wide.
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         depth, dscale = map_fn(dpipe, frame)
+
+        ok, enc = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, args.jpeg_quality])
+        if ok:
+            pristine_frame_cache[frame_idx] = enc.tobytes()
 
         v5.draw_road_overlay(frame, road_mask)
 
@@ -784,8 +796,8 @@ def main():
     #      self-explanatory on its own ----
     if demo_candidates:
         from demo_screenshots import write_screenshots
-        write_screenshots(args.input, args.output, frame_cache, candidate_frame_box, demo_candidates,
-                          out_dir=args.screenshot_dir)
+        write_screenshots(args.input, args.output, frame_cache, pristine_frame_cache, candidate_frame_box,
+                          demo_candidates, out_dir=args.screenshot_dir)
 
 
 if __name__ == "__main__":
