@@ -9,3 +9,8 @@ timm
 prefetch_generator
 yacs
 lap
+
+# Frozen-executable packaging -- not a runtime dependency of the pipeline
+# itself, only needed to run build_worker.sh (see PythonWorker/README.md's
+# own "Frozen-executable packaging" note for the same convention).
+pyinstaller>=6.10

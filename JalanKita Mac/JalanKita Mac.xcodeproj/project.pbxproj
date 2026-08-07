@@ -56,6 +56,7 @@
 				4EBA2FE03021C3AE004B0D93 /* Frameworks */,
 				4EBA2FE13021C3AE004B0D93 /* Resources */,
 				4EBA30013021C3AE004B0D93 /* Stage disturbance-worker */,
+				4EBA30023021C3AE004B0D93 /* Stage pipeline_v13 */,
 			);
 			buildRules = (
 			);
@@ -135,6 +136,27 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = "set -e\nSRC=\"${SRCROOT}/../PythonWorker/dist/disturbance-worker/\"\nDEST=\"${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Resources/disturbance-worker/\"\n\nif [ ! -d \"$SRC\" ]; then\n  echo \"warning: PythonWorker/dist/disturbance-worker not found -- run PythonWorker/build_worker.sh first to bundle a real worker into the app. Skipping (Debug/dev builds fall back to PythonWorker/.venv instead, see InferenceService.resolveWorkerLaunch).\"\n  exit 0\nfi\n\nmkdir -p \"$DEST\"\nrsync -a --delete \"$SRC\" \"$DEST\"\necho \"staged disturbance-worker into $DEST\"\n";
+			showEnvVarsInLog = 0;
+		};
+		4EBA30023021C3AE004B0D93 /* Stage pipeline_v13 */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Stage pipeline_v13";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/pipeline_v13/pipeline_v13",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -e\nSRC=\"${SRCROOT}/../CarDetection/dist/pipeline_v13/\"\nDEST=\"${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Resources/pipeline_v13/\"\n\nif [ ! -d \"$SRC\" ]; then\n  echo \"warning: CarDetection/dist/pipeline_v13 not found -- run CarDetection/build_worker.sh first to bundle a real worker into the app. Skipping (Debug/dev builds fall back to CarDetection/.venv instead, see CarDetectionService.resolveLaunch).\"\n  exit 0\nfi\n\nmkdir -p \"$DEST\"\nrsync -a --delete \"$SRC\" \"$DEST\"\necho \"staged pipeline_v13 into $DEST\"\n";
 			showEnvVarsInLog = 0;
 		};
 /* End PBXShellScriptBuildPhase section */
@@ -279,7 +301,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 6N4SKDX637;
+				DEVELOPMENT_TEAM = S3AP74B5TH;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
@@ -311,7 +333,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 6N4SKDX637;
+				DEVELOPMENT_TEAM = S3AP74B5TH;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
