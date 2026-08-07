@@ -122,20 +122,23 @@ final class InferenceService {
     /// would otherwise resolve to a `python3` with none of the pipeline's
     /// dependencies installed.
     ///
-    /// All three launches pass `--no-instance-model`: skips OFRSNet's own
-    /// Mask2Former-instance forward pass (src/instances.py), falling back to
-    /// connected-components for per-vehicle attribution. Worth it because the
-    /// video pipeline already has a precise per-car mask from v13 and never
-    /// needed OFRSNet to rediscover vehicle boundaries; the one thing it costs
-    /// is that touching/overlapping vehicles in a frame can get merged into
-    /// one attributed blob (see instances.py's own docstring) instead of
-    /// split cleanly — applies to Tinjauan Parkir's photo flow too, since
-    /// both share this one worker process.
+    /// Deliberately NOT passing `--no-instance-model` here, despite the
+    /// tempting speed win: measured side-by-side on a real candidate image,
+    /// disabling it doesn't just merge touching vehicles (the cost this was
+    /// originally scoped for) -- connected-components blobs have no
+    /// confidence score, so they can never pass the score>=0.85 bar
+    /// `auto_vehicle_height` camera-height calibration requires. Losing that
+    /// silently drops calibration back to a generic 1.65m fixed assumption
+    /// instead of the scene's real height (measured 2.32m on one test
+    /// image), which throws off the scale correction for every area number
+    /// in the frame, not just the flagged car's. Confirmed: same image,
+    /// candidate car's own area went from a clean 1.23 m^2 (instance model)
+    /// to merged into a 12.63 m^2 blob (connected components). Not worth it.
     private static func resolveWorkerLaunch() throws -> (executable: URL, arguments: [String], cwd: URL?) {
         if let bundled = Bundle.main.resourceURL?
             .appendingPathComponent("disturbance-worker/disturbance-worker"),
            FileManager.default.isExecutableFile(atPath: bundled.path) {
-            return (bundled, ["--serve", "--no-instance-model"], nil)
+            return (bundled, ["--serve"], nil)
         }
 
         if let repoPath = ProcessInfo.processInfo.environment["JALANKITA_DISTURBANCE_REPO"],
@@ -153,7 +156,7 @@ final class InferenceService {
     private static func devLaunch(repoRoot: URL) -> (executable: URL, arguments: [String], cwd: URL?)? {
         let python = repoRoot.appendingPathComponent(".venv/bin/python3")
         guard FileManager.default.isExecutableFile(atPath: python.path) else { return nil }
-        return (python, ["-m", "src.disturbance", "--serve", "--no-instance-model"], repoRoot)
+        return (python, ["-m", "src.disturbance", "--serve"], repoRoot)
     }
 
     /// `PythonWorker/`, five path components up from this source file

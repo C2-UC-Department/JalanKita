@@ -130,6 +130,20 @@ struct ParkingAnalysis: Identifiable {
             .filter { ($0.areaM2 ?? 0) > 0 }
             .sorted { ($0.areaM2 ?? 0) > ($1.areaM2 ?? 0) }
     }
+
+    /// Best default vehicle to select: v13's own candidate box matched by
+    /// position against OFRSNet's independently-detected `vehicles`, not
+    /// just whichever one OFRSNet ranks largest by area. That "largest area"
+    /// default can silently point at the wrong object in a cluttered frame
+    /// (confirmed on a real video: it picked a motorcycle+rider sliver
+    /// instead of the actual flagged car, because that sliver's computed
+    /// area happened to be bigger). Falls back to `rankedVehicles.first` --
+    /// same as before -- when there's no carCandidate (manual photo upload)
+    /// or nothing overlaps its box meaningfully.
+    var bestMatchVehicleID: Int? {
+        ParkingMetrics.bestMatchVehicleID(candidateBBox: carCandidate?.pixelBBox, vehicles: summary.vehicles)
+            ?? rankedVehicles.first?.id
+    }
 }
 
 /// One 10-metre road segment as reported back by the pipeline — the

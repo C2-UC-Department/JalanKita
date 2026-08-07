@@ -98,7 +98,7 @@ struct VideoDetectionView: View {
         // forever -- which, combined with showAllVehicles: false below,
         // rendered nothing and left every stat blank.
         .task(id: selectedAnalysis?.id) {
-            selectedVehicleID = selectedAnalysis?.rankedVehicles.first?.id
+            selectedVehicleID = selectedAnalysis?.bestMatchVehicleID
         }
         .onChange(of: selectedVehicleID) { _, newValue in
             guard let sessionID = model.latestVideoSessionID, let analysisID = selectedAnalysis?.id else { return }

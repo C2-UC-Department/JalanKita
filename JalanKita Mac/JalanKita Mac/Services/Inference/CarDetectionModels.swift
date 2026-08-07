@@ -11,6 +11,7 @@
 //
 
 import Foundation
+import CoreGraphics
 
 /// One car v13 classified as PARKED (its own STOP_CLASS bucket, including the
 /// depth-tiebreak variant) -- a candidate photo for OFRSNet to score.
@@ -31,8 +32,22 @@ struct CarCandidate: Decodable, Identifiable {
     /// demo_screenshots.py's write_screenshots() doc comment for why the
     /// annotated version must never be fed to a segmentation model.
     let fileClean: String
+    /// v13's own box for this car `[u0, v0, u1, v1]`, in the same pixel space
+    /// as `fileClean` -- lets `ParkingMetrics.bestMatchVehicleID` find which
+    /// of OFRSNet's independently-detected vehicles is actually this one,
+    /// instead of defaulting to whichever OFRSNet ranks largest by area
+    /// (which can silently be a different object in a cluttered frame).
+    let bbox: [Int]
 
     var id: Int { trackID }
+
+    /// Mirrors `VehicleSummary.pixelBBox` so both sides compare in the same terms.
+    var pixelBBox: CGRect? {
+        guard bbox.count == 4 else { return nil }
+        let u0 = CGFloat(bbox[0]), v0 = CGFloat(bbox[1])
+        let u1 = CGFloat(bbox[2]), v1 = CGFloat(bbox[3])
+        return CGRect(x: u0, y: v0, width: max(0, u1 - u0), height: max(0, v1 - v0))
+    }
 
     enum CodingKeys: String, CodingKey {
         case trackID = "track_id"
@@ -43,6 +58,7 @@ struct CarCandidate: Decodable, Identifiable {
         case midSeconds = "mid_seconds"
         case file
         case fileClean = "file_clean"
+        case bbox
     }
 }
 

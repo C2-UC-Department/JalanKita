@@ -18,20 +18,8 @@ import config  # noqa: E402
 # Device
 # --------------------------------------------------------------------------- #
 def pick_device():
-    """Return the best available torch device following DEVICE_PREFERENCE.
-
-    Honors PYTHONWORKER_FORCE_CPU=1 as an override: the JalanKita Mac app sets
-    this when launching the worker, to work around a reproducible MPS/Metal
-    command-buffer validation crash (SIGABRT in ge_mps_kernel, seen via the
-    macOS crash reporter) that showed up running OFRSNet through the app.
-    Standalone/CLI runs that don't set the env var are unaffected and still
-    get MPS by default.
-    """
-    import os
+    """Return the best available torch device following DEVICE_PREFERENCE."""
     import torch
-
-    if os.environ.get("PYTHONWORKER_FORCE_CPU") == "1":
-        return torch.device("cpu")
 
     for name in config.DEVICE_PREFERENCE:
         if name == "cuda" and torch.cuda.is_available():
