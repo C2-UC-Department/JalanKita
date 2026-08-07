@@ -17,6 +17,7 @@ frozen module's `__file__`):
           on the first `_candidates.png`/`_bev.png` write. Redirected to
           ~/Library/Application Support instead, a real writable location.
 """
+import multiprocessing
 import sys
 from pathlib import Path
 
@@ -30,6 +31,19 @@ sys.path.insert(0, str(BASE_DIR))
 from src.disturbance import main  # noqa: E402
 
 if __name__ == "__main__":
+    # Required for a frozen build: without this, anything that triggers
+    # multiprocessing (confirmed here -- PyTorch starts a resource_tracker
+    # helper process on its own) relaunches via sys.executable, which in a
+    # frozen build IS this same executable, not a real Python interpreter --
+    # it gets called with interpreter flags (-B -S -I -c ...) that this app's
+    # own argparse doesn't recognize, fails, and resource_tracker retries
+    # forever. freeze_support() makes multiprocessing route that relaunch
+    # through PyInstaller's own bootloader sentinel instead. Confirmed via a
+    # real frozen build: without this, the worker crashed shortly after
+    # reaching "ready", spamming "unrecognized arguments: -B -S -I -c
+    # from multiprocessing.resource_tracker import main;main(N)".
+    multiprocessing.freeze_support()
+
     ckpt_path = BASE_DIR / "checkpoints" / "ofrsnet_best.pt"
     if "--ckpt" not in sys.argv and ckpt_path.exists():
         sys.argv += ["--ckpt", str(ckpt_path)]

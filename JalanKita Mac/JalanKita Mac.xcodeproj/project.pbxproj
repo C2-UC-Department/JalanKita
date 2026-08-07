@@ -56,6 +56,7 @@
 				4EBA2FE03021C3AE004B0D93 /* Frameworks */,
 				4EBA2FE13021C3AE004B0D93 /* Resources */,
 				4EBA30013021C3AE004B0D93 /* Stage disturbance-worker */,
+				4EBA30023021C3AE004B0D94 /* Stage CarDetection */,
 			);
 			buildRules = (
 			);
@@ -135,6 +136,27 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = "set -e\nSRC=\"${SRCROOT}/../PythonWorker/dist/disturbance-worker/\"\nDEST=\"${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Resources/disturbance-worker/\"\n\nif [ ! -d \"$SRC\" ]; then\n  echo \"warning: PythonWorker/dist/disturbance-worker not found -- run PythonWorker/build_worker.sh first to bundle a real worker into the app. Skipping (Debug/dev builds fall back to PythonWorker/.venv instead, see InferenceService.resolveWorkerLaunch).\"\n  exit 0\nfi\n\nmkdir -p \"$DEST\"\nrsync -a --delete \"$SRC\" \"$DEST\"\necho \"staged disturbance-worker into $DEST\"\n";
+			showEnvVarsInLog = 0;
+		};
+		4EBA30023021C3AE004B0D94 /* Stage CarDetection */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Stage CarDetection";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/car-detection/cardetection",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -e\nSRC=\"${SRCROOT}/../CarDetection/dist/cardetection/\"\nDEST=\"${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Resources/car-detection/\"\n\nif [ ! -d \"$SRC\" ]; then\n  echo \"warning: CarDetection/dist/cardetection not found -- run CarDetection/build_cardetection.sh first to bundle a real worker into the app. Skipping (Debug/dev builds fall back to CarDetection/.venv instead, see CarDetectionService.resolveLaunch).\"\n  exit 0\nfi\n\nmkdir -p \"$DEST\"\nrsync -a --delete \"$SRC\" \"$DEST\"\necho \"staged CarDetection into $DEST\"\n";
 			showEnvVarsInLog = 0;
 		};
 /* End PBXShellScriptBuildPhase section */

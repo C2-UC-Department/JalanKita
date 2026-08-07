@@ -87,8 +87,14 @@ actor CarDetectionWorkerProcess {
 
         let process = Process()
         process.executableURL = executableURL
-        process.arguments = [
-            scriptURL.path,
+        // Dev mode: executableURL is python3, scriptURL is pipeline_v13.py --
+        // `python3 pipeline_v13.py --input ...` needs the script path as the
+        // first argument. Packaged mode: executableURL == scriptURL (the
+        // frozen binary IS the interpreter, see CarDetectionService's
+        // resolveLaunch) -- passing its own path as an extra positional arg
+        // would break its argparse, which expects `--input` first.
+        let scriptArg = executableURL == scriptURL ? [] : [scriptURL.path]
+        process.arguments = scriptArg + [
             "--input", video.path,
             "--output", outputVideoPath.path,
             "--screenshot-dir", screenshotDir.path,

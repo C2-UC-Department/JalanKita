@@ -1,3 +1,7 @@
 .venv/
 __pycache__/
 *.pyc
+build/
+dist/
+torch_hub_cache/
+*.spec.bak
