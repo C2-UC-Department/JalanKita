@@ -94,6 +94,10 @@ def write_screenshots(input_video, output_video, frame_cache, pristine_frame_cac
             "track_id": int(track_id), "stop_class": stop_class, "disturbance": bool(in_zone),
             "depth_reading": depth_txt, "mid_frame": int(mid_frame_idx),
             "mid_seconds": round(float(mid_seconds), 1), "file": fname, "file_clean": fname_clean,
+            # v13's own box for this candidate in the same pixel space as file_clean, so a
+            # downstream consumer (JalanKita Mac) can match it against OFRSNet's independently
+            # detected vehicle list by position instead of guessing which one is "the" car.
+            "bbox": [int(v) for v in box],
         })
 
     with open(os.path.join(out_dir, "_summary.json"), "w") as f:
