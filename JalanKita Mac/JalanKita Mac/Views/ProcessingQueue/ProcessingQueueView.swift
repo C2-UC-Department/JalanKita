@@ -16,6 +16,13 @@
 //  eventually open the path — staging a plain copy sidesteps that instead
 //  of trying to extend sandbox access to a child process.
 //
+//  Video upload (v13 car-detection) lives on its own screen now --
+//  Views/VideoDetection/VideoDetectionView.swift -- not here. An earlier
+//  version added a second "Unggah video…" toolbar button + fileImporter to
+//  THIS screen; the project owner asked for a dedicated section instead, so
+//  that upload action and result together read as one self-contained flow
+//  rather than split across this queue and Tinjauan Parkir.
+//
 
 import SwiftUI
 import UniformTypeIdentifiers

@@ -26,7 +26,7 @@ struct ParkingSessionListView: View {
                 )
             } else {
                 List(model.parkingReviewSessions, selection: $selectedSessionID) { session in
-                    ParkingSessionRow(session: session, analysis: model.parkingAnalyses[session.id])
+                    ParkingSessionRow(session: session, analyses: model.parkingAnalyses[session.id] ?? [])
                 }
                 .listStyle(.sidebar)
             }
@@ -37,22 +37,28 @@ struct ParkingSessionListView: View {
 
 private struct ParkingSessionRow: View {
     let session: Session
-    let analysis: ParkingAnalysis?
+    let analyses: [ParkingAnalysis]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(session.roadName)
                 .font(.system(size: 13, weight: .semibold))
-            Text("\(session.date) · \(vehicleCountText)")
+            Text("\(session.date) · \(candidateCountText)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
         .padding(.vertical, 4)
     }
 
-    private var vehicleCountText: String {
-        guard let analysis else { return "—" }
-        let n = analysis.rankedVehicles.count
-        return n == 1 ? "1 kendaraan" : "\(n) kendaraan"
+    /// Counts CANDIDATE PHOTOS (one per car v13 flagged PARKED in this
+    /// session's video, or the single manual photo upload), not vehicles
+    /// within a photo — that finer count lives per-candidate now, shown once
+    /// one is selected in the middle pane.
+    private var candidateCountText: String {
+        switch analyses.count {
+        case 0: "—"
+        case 1: "1 foto"
+        default: "\(analyses.count) foto"
+        }
     }
 }

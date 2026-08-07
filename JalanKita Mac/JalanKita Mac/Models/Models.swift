@@ -103,7 +103,13 @@ struct ReviewFrame: Identifiable, Hashable {
 /// screen's unit of work. `bevPNGPath` is `var`: `AppModel.selectParkingVehicle`
 /// updates it in place each time the user taps a different vehicle overlay,
 /// re-rendering the BEV panel with that vehicle's share highlighted.
+///
+/// One session can now hold SEVERAL of these — one per car v13 found parked
+/// in the source video (see AppModel.parkingAnalyses, `[Session.ID:
+/// [ParkingAnalysis]]`) — so `id` is its own value, not the session id;
+/// `sessionID` groups analyses that came from the same upload.
 struct ParkingAnalysis: Identifiable {
+    let id: String
     let sessionID: Session.ID
     let imageURL: URL
     let imageWidth: Int
@@ -111,7 +117,11 @@ struct ParkingAnalysis: Identifiable {
     let summary: DisturbanceSummary
     var bevPNGPath: String?
 
-    var id: Session.ID { sessionID }
+    /// nil for a plain manual photo upload (AppModel.uploadImage) — set only
+    /// when this analysis came from a v13 car-detection candidate, carrying
+    /// the context OFRSNet itself doesn't know about (which STOP_CLASS, the
+    /// depth reading, whether it was inside a sign's zone).
+    var carCandidate: CarCandidate?
 
     /// Vehicles with a measurable share, ranked by area descending —
     /// mirrors `src/disturbance.py`'s own `_print_report` ranking.

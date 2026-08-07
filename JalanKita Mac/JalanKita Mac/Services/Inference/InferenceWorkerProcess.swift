@@ -99,6 +99,14 @@ actor InferenceWorkerProcess {
         if let workingDirectory {
             process.currentDirectoryURL = workingDirectory
         }
+        // Force CPU inference: a reproducible MPS/Metal command-buffer
+        // validation crash (SIGABRT in ge_mps_kernel, confirmed via the
+        // macOS crash reporter) was hit running OFRSNet through this app.
+        // Scoped to launches from the app only — src/common.py's pick_device()
+        // still defaults to MPS for standalone/CLI runs that don't set this.
+        var environment = ProcessInfo.processInfo.environment
+        environment["PYTHONWORKER_FORCE_CPU"] = "1"
+        process.environment = environment
 
         let stdinPipe = Pipe()
         let stdoutPipe = Pipe()

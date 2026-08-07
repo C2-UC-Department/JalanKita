@@ -121,11 +121,21 @@ final class InferenceService {
     /// app without inheriting a terminal's venv, so `/usr/bin/env python3`
     /// would otherwise resolve to a `python3` with none of the pipeline's
     /// dependencies installed.
+    ///
+    /// All three launches pass `--no-instance-model`: skips OFRSNet's own
+    /// Mask2Former-instance forward pass (src/instances.py), falling back to
+    /// connected-components for per-vehicle attribution. Worth it because the
+    /// video pipeline already has a precise per-car mask from v13 and never
+    /// needed OFRSNet to rediscover vehicle boundaries; the one thing it costs
+    /// is that touching/overlapping vehicles in a frame can get merged into
+    /// one attributed blob (see instances.py's own docstring) instead of
+    /// split cleanly — applies to Tinjauan Parkir's photo flow too, since
+    /// both share this one worker process.
     private static func resolveWorkerLaunch() throws -> (executable: URL, arguments: [String], cwd: URL?) {
         if let bundled = Bundle.main.resourceURL?
             .appendingPathComponent("disturbance-worker/disturbance-worker"),
            FileManager.default.isExecutableFile(atPath: bundled.path) {
-            return (bundled, ["--serve"], nil)
+            return (bundled, ["--serve", "--no-instance-model"], nil)
         }
 
         if let repoPath = ProcessInfo.processInfo.environment["JALANKITA_DISTURBANCE_REPO"],
@@ -143,7 +153,7 @@ final class InferenceService {
     private static func devLaunch(repoRoot: URL) -> (executable: URL, arguments: [String], cwd: URL?)? {
         let python = repoRoot.appendingPathComponent(".venv/bin/python3")
         guard FileManager.default.isExecutableFile(atPath: python.path) else { return nil }
-        return (python, ["-m", "src.disturbance", "--serve"], repoRoot)
+        return (python, ["-m", "src.disturbance", "--serve", "--no-instance-model"], repoRoot)
     }
 
     /// `PythonWorker/`, five path components up from this source file

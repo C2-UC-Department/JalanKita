@@ -21,15 +21,22 @@ struct ParkingReviewView: View {
     var model: AppModel
 
     @State private var selectedSessionID: Session.ID?
+    @State private var selectedAnalysisID: ParkingAnalysis.ID?
     @State private var selectedVehicleID: Int?
 
+    private var analysesInSession: [ParkingAnalysis] {
+        selectedSessionID.flatMap { model.parkingAnalyses[$0] } ?? []
+    }
+
     private var analysis: ParkingAnalysis? {
-        selectedSessionID.flatMap { model.parkingAnalyses[$0] }
+        guard let selectedAnalysisID else { return analysesInSession.first }
+        return analysesInSession.first { $0.id == selectedAnalysisID } ?? analysesInSession.first
     }
 
     var body: some View {
         HStack(spacing: 0) {
             ParkingSessionListView(model: model, selectedSessionID: $selectedSessionID)
+            ParkingCandidateStripView(analyses: analysesInSession, selectedAnalysisID: $selectedAnalysisID)
 
             if let analysis {
                 VehicleCandidatesCanvasView(analysis: analysis, selectedVehicleID: $selectedVehicleID)
@@ -53,16 +60,15 @@ struct ParkingReviewView: View {
                 selectedSessionID = model.parkingReviewSessions.last?.id
             }
         }
-        .onChange(of: selectedSessionID) { _, newValue in
-            guard let newValue, let analysis = model.parkingAnalyses[newValue] else {
-                selectedVehicleID = nil
-                return
-            }
-            selectedVehicleID = analysis.rankedVehicles.first?.id
+        .onChange(of: selectedSessionID) { _, _ in
+            selectedAnalysisID = analysesInSession.first?.id
+        }
+        .onChange(of: selectedAnalysisID) { _, _ in
+            selectedVehicleID = analysis?.rankedVehicles.first?.id
         }
         .onChange(of: selectedVehicleID) { _, newValue in
-            guard let sessionID = selectedSessionID else { return }
-            Task { await model.selectParkingVehicle(sessionID: sessionID, vehicleID: newValue) }
+            guard let sessionID = selectedSessionID, let analysisID = analysis?.id else { return }
+            Task { await model.selectParkingVehicle(sessionID: sessionID, analysisID: analysisID, vehicleID: newValue) }
         }
     }
 

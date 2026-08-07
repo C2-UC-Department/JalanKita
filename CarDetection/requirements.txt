@@ -1,0 +1,11 @@
+ultralytics
+torch
+torchvision
+opencv-python
+numpy
+scipy
+Pillow
+timm
+prefetch_generator
+yacs
+lap

@@ -16,6 +16,14 @@ struct VehicleCandidatesCanvasView: View {
     let analysis: ParkingAnalysis
     @Binding var selectedVehicleID: Int?
 
+    /// Tinjauan Parkir shows every OFRSNet occluder because a human is
+    /// disambiguating which one is the flagged violation. The video pipeline
+    /// already knows the answer (v13's own track) before OFRSNet ever runs,
+    /// so showing every other car/truck in frame as a numbered, tappable
+    /// candidate is just confusing noise there -- set this false to render
+    /// only the selected vehicle, with no picker affordance.
+    var showAllVehicles: Bool = true
+
     @State private var loadedImage: NSImage?
 
     private var aspectRatio: CGFloat {
@@ -32,7 +40,7 @@ struct VehicleCandidatesCanvasView: View {
                     .frame(width: geo.size.width, height: geo.size.height)
                     .clipped()
 
-                ForEach(analysis.summary.vehicles, id: \.id) { vehicle in
+                ForEach(visibleVehicles, id: \.id) { vehicle in
                     let rect = ParkingMetrics.normalizedRect(for: vehicle, imageWidth: analysis.imageWidth,
                                                              imageHeight: analysis.imageHeight)
                     if rect.width > 0, rect.height > 0 {
@@ -41,7 +49,7 @@ struct VehicleCandidatesCanvasView: View {
                             .position(x: (rect.minX + rect.width / 2) * geo.size.width,
                                      y: (rect.minY + rect.height / 2) * geo.size.height)
                             .onTapGesture {
-                                guard vehicle.selectable else { return }
+                                guard showAllVehicles, vehicle.selectable else { return }
                                 selectedVehicleID = vehicle.id
                             }
                     }
@@ -54,6 +62,10 @@ struct VehicleCandidatesCanvasView: View {
         .task(id: analysis.imageURL) {
             loadedImage = NSImage(contentsOf: analysis.imageURL)
         }
+    }
+
+    private var visibleVehicles: [VehicleSummary] {
+        showAllVehicles ? analysis.summary.vehicles : analysis.summary.vehicles.filter { $0.id == selectedVehicleID }
     }
 
     private var background: Image {

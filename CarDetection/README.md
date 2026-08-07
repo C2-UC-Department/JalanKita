@@ -1,0 +1,85 @@
+# CarDetection
+
+The car-detection-from-video pipeline (v13's `pipeline_v13.py`) that JalanKita Mac's
+`CarDetectionService` talks to as a one-shot subprocess per video, feeding its output into the
+disturbance pipeline (`PythonWorker/`). This is a trimmed, self-contained copy of the relevant
+runtime slice of the original v13 dev workspace — just what `pipeline_v13.py` needs to run, not
+the historical dev artifacts (test clips, run logs, calibration docs, the v12 file it was diffed
+against). Kept here for the same reason `PythonWorker/README.md` gives for its own copy: so
+contributors can build and run the macOS app without a second repo checkout.
+
+## What's here
+
+```
+pipeline_v13.py              The pipeline: YOLOv8n-seg+ByteTrack detection/tracking, v5 epipolar +
+                              v6 FoE motion signals, v8 STOP_CLASS, v10 sign/zone DISTURBANCE
+                              verdict, MiDaS depth as an UNRESOLVED tiebreaker (Option B).
+demo_screenshots.py           Called automatically by pipeline_v13.py at the end of a run — writes
+                              one annotated + one clean JPEG per PARKED-family car, plus
+                              _summary.json (see below).
+lib/                          v5/v6/v8 signal code + v10 sign/coverage-zone code, its direct
+                              dependency closure.
+depth/                        Depth-rate measurement (MiDaS backend + calibration).
+models/signs_crosswalk_v10_hardneg_r3_best.pt   Our own trained sign/crosswalk detector weights.
+yolov8n-seg.pt                 Stock Ultralytics vehicle detector/segmenter weights.
+requirements.txt               Inference-only dependencies.
+```
+
+Two more models download and cache themselves on first run via `torch.hub` (`~/.cache/torch/hub`,
+shared across venvs, same caching JalanKita Mac's other worker relies on for its own HuggingFace
+models): YOLOP (road segmentation) and MiDaS_small (depth). No manual download needed, but the
+first real run will be slower while these fetch.
+
+## Dev setup (no PyInstaller build needed)
+
+```
+cd CarDetection
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+`CarDetectionService.resolveLaunch()` auto-detects `CarDetection/.venv/bin/python3` as a sibling
+of the Xcode project, same tier as `InferenceService`'s own `PythonWorker/.venv` auto-detection.
+No environment variable needed for the common case; set `JALANKITA_V13_REPO` /
+`JALANKITA_V13_PYTHON` only if you want to point at a different checkout (e.g. a full v13 dev
+workspace with more than this trimmed runtime slice).
+
+Sanity-check the pipeline directly before touching Xcode at all:
+
+```
+python3 pipeline_v13.py --input /path/to/a/clip.mov --output /tmp/out.mp4 \
+                        --screenshot-dir /tmp/cardetection-test --deterministic
+```
+
+Should print a per-track table to stderr and, if any car reached a PARKED-family verdict, write
+`_summary.json` + JPEGs into `--screenshot-dir`. `--deterministic` forces single-threaded CPU (~6
+min for a 5s clip) but reproducible — this is what the app actually invokes, deliberately, over the
+faster `--device mps` default: without it, ByteTrack's own run-to-run non-determinism can flip
+whether the one ground-truth violation clip in this project's history reports 0 or 1 disturbances
+between identical runs. Slow-and-correct over fast-and-sometimes-wrong.
+
+## requirements.txt was built empirically, not by copying an existing environment
+
+Every entry here was added because a fresh venv failed loudly without it (`ModuleNotFoundError`),
+not guessed from `pip freeze` on a large, unrelated personal environment. Three of the eight lines
+are transitive dependencies of `torch.hub`-loaded repos (YOLOP needs `prefetch_generator` and
+`yacs`; ByteTrack needs `lap`) that don't show up in any `import` statement in this folder's own
+`.py` files — `ultralytics` will silently auto-install `lap` itself at runtime if it's missing
+("AutoUpdate success"), which is why it's listed explicitly here instead of being left to that
+mechanism: a teammate's first run shouldn't depend on an internet-connected surprise pip install
+mutating their venv mid-run.
+
+## No PyInstaller build yet
+
+Unlike `disturbance-worker`, there is no frozen build of this pipeline — `CarDetectionService`
+only resolves a dev-mode launch (`.venv/bin/python3 pipeline_v13.py`). A distributed/archived build
+of JalanKita Mac does not currently include car-detection-from-video at all; it needs a dev
+Python environment present, same constraint the "Building the frozen worker" section of
+`PythonWorker/README.md` describes solving for the disturbance pipeline, not yet done here.
+
+## Keeping this in sync with the v13 dev workspace
+
+This is a manually-maintained copy, not a submodule — same caveat as `PythonWorker/README.md`
+states for its own copy. If `pipeline_v13.py` (or anything it imports) changes in the dev
+workspace, re-copy the affected files here by hand and re-run the dev sanity check above.
