@@ -25,6 +25,7 @@
 
 import Foundation
 import Observation
+import JalanKitaKit
 
 @Observable
 final class AppModel {

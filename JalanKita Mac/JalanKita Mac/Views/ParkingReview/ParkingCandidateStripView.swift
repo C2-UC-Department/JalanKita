@@ -12,6 +12,7 @@
 //
 
 import SwiftUI
+import JalanKitaKit
 
 struct ParkingCandidateStripView: View {
     let analyses: [ParkingAnalysis]

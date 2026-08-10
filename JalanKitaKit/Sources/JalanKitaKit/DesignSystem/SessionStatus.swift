@@ -1,22 +1,26 @@
 //
 //  SessionStatus.swift
-//  JalanKita Mac
+//  JalanKitaKit
 //
 //  Pipeline/processing status for a session — orthogonal to road-condition
 //  Severity. This tracks where a *session* sits in the ingest → process →
 //  report pipeline, not how bad the road is.
 //
+//  Shared verbatim between JalanKita Mac and JalanKita iOS. The iOS
+//  recording app also reuses `.degraded(reason:)` for GPS-loss during
+//  capture, rather than inventing a parallel status vocabulary.
+//
 
 import SwiftUI
 
-enum SessionStatus: Hashable {
+public enum SessionStatus: Hashable, Codable, Sendable {
     case readyToProcess
     case segmenting(progress: Double)
     case degraded(reason: String)
     case done
     case failed(reason: String)
 
-    var label: String {
+    public var label: String {
         switch self {
         case .readyToProcess: "SIAP DIPROSES"
         case .segmenting(let p): "SEGMENTASI \(Int(p * 100))%"
@@ -26,7 +30,7 @@ enum SessionStatus: Hashable {
         }
     }
 
-    var symbolName: String? {
+    public var symbolName: String? {
         switch self {
         case .readyToProcess: "square.fill"
         case .segmenting: "circle.fill"
@@ -36,7 +40,7 @@ enum SessionStatus: Hashable {
         }
     }
 
-    var foreground: Color {
+    public var foreground: Color {
         switch self {
         case .readyToProcess: Color(white: 0.35)
         case .segmenting: .white
@@ -46,7 +50,7 @@ enum SessionStatus: Hashable {
         }
     }
 
-    var background: Color {
+    public var background: Color {
         switch self {
         case .readyToProcess: Color(white: 0.90)
         case .segmenting: Color(red: 0.20, green: 0.48, blue: 0.96)
@@ -59,7 +63,7 @@ enum SessionStatus: Hashable {
     /// A session counts toward the processing queue once it's ready or
     /// already running — not before (still just an inbox item) and not
     /// after (done/failed/degraded sessions leave the active queue).
-    var isQueued: Bool {
+    public var isQueued: Bool {
         switch self {
         case .readyToProcess, .segmenting: true
         case .degraded, .done, .failed: false
@@ -67,10 +71,14 @@ enum SessionStatus: Hashable {
     }
 }
 
-struct SessionStatusBadge: View {
+public struct SessionStatusBadge: View {
     let status: SessionStatus
 
-    var body: some View {
+    public init(status: SessionStatus) {
+        self.status = status
+    }
+
+    public var body: some View {
         HStack(spacing: 5) {
             if let symbol = status.symbolName {
                 Image(systemName: symbol)

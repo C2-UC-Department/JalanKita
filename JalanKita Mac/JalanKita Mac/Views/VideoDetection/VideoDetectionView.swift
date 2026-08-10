@@ -20,6 +20,7 @@
 
 import SwiftUI
 import UniformTypeIdentifiers
+import JalanKitaKit
 
 struct VideoDetectionView: View {
     var model: AppModel

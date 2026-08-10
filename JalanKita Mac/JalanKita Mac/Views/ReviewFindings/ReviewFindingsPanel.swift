@@ -11,6 +11,7 @@
 //
 
 import SwiftUI
+import JalanKitaKit
 
 struct ReviewFindingsPanel: View {
     let frame: ReviewFrame

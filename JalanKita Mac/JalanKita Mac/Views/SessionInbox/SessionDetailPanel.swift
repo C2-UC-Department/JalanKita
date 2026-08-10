@@ -11,6 +11,7 @@
 
 import SwiftUI
 import MapKit
+import JalanKitaKit
 
 struct SessionDetailPanel: View {
     let session: Session

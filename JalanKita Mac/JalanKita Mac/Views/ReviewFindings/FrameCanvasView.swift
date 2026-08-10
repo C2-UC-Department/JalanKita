@@ -13,6 +13,7 @@
 //
 
 import SwiftUI
+import JalanKitaKit
 
 struct FrameCanvasView: View {
     /// Width ÷ height of ReviewSampleFrame (3024 × 4032 px).

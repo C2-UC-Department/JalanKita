@@ -12,6 +12,7 @@
 //
 
 import SwiftUI
+import JalanKitaKit
 
 struct SessionInboxView: View {
     @Bindable var model: AppModel

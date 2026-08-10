@@ -1,34 +1,41 @@
 //
 //  Theme.swift
-//  JalanKita Mac
+//  JalanKitaKit
 //
-//  Just the reusable pieces that don't already exist in SwiftUI/AppKit:
-//  a monospaced-digit font helper (tabular data stays aligned) and two
-//  small domain views (a stat tile, a section caption). Chrome colors —
-//  panel backgrounds, separators, accent — now come straight from the
-//  system (`Color.accentColor`, `NSColor.controlBackgroundColor`,
-//  `NSColor.separatorColor`) at each call site instead of a custom
-//  `Theme.accent` / `Theme.panel` / `Theme.hairline` palette that
-//  duplicated them and didn't track Increase Contrast or a custom accent
-//  color choice.
+//  Just the reusable pieces that don't already exist in SwiftUI: a
+//  monospaced-digit font helper (tabular data stays aligned) and two small
+//  domain views (a stat tile, a section caption). Chrome colors — panel
+//  backgrounds, separators, accent — come straight from the system
+//  (`Color.accentColor`, platform separator colors) at each call site
+//  instead of a custom palette that duplicated them.
+//
+//  Shared verbatim between JalanKita Mac and JalanKita iOS.
 //
 
 import SwiftUI
 
 extension Font {
-    static func data(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
+    public static func data(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
         .system(size: size, weight: weight, design: .monospaced)
     }
 }
 
-struct StatTile: View {
+public struct StatTile: View {
     let title: String
     let value: String
     let unit: String?
     var detail: String?
     var accent: Color = .primary
 
-    var body: some View {
+    public init(title: String, value: String, unit: String? = nil, detail: String? = nil, accent: Color = .primary) {
+        self.title = title
+        self.value = value
+        self.unit = unit
+        self.detail = detail
+        self.accent = accent
+    }
+
+    public var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
                 .font(.caption2.weight(.semibold))
@@ -54,9 +61,14 @@ struct StatTile: View {
     }
 }
 
-struct SectionLabel: View {
+public struct SectionLabel: View {
     let text: String
-    var body: some View {
+
+    public init(text: String) {
+        self.text = text
+    }
+
+    public var body: some View {
         Text(text)
             .font(.caption2.weight(.bold))
             .tracking(0.8)

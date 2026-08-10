@@ -1,6 +1,6 @@
 //
 //  ParkingMetrics.swift
-//  JalanKita Mac
+//  JalanKitaKit
 //
 //  Small pure-computation helpers shared by the "Tinjauan Parkir" screen
 //  (VehicleCandidatesCanvasView, ParkingMetricsPanel): normalizing a
@@ -13,8 +13,8 @@
 import CoreGraphics
 import Foundation
 
-enum ParkingMetrics {
-    static func percentOfSurface(area: Double?, ofTotal total: Double) -> Double? {
+public enum ParkingMetrics {
+    public static func percentOfSurface(area: Double?, ofTotal total: Double) -> Double? {
         guard let area, total > 0 else { return nil }
         return 100 * area / total
     }
@@ -22,7 +22,7 @@ enum ParkingMetrics {
     /// Image-space `vehicle.pixelBBox`, normalized to (0...1) against the
     /// analyzed image's own dimensions — what `VehicleCandidatesCanvasView`
     /// positions its tappable overlays with.
-    static func normalizedRect(for vehicle: VehicleSummary, imageWidth: Int,
+    public static func normalizedRect(for vehicle: VehicleSummary, imageWidth: Int,
                                imageHeight: Int) -> CGRect {
         guard let pixelBBox = vehicle.pixelBBox, imageWidth > 0, imageHeight > 0 else {
             return .zero
@@ -55,7 +55,7 @@ enum ParkingMetrics {
     /// Falls back to nil (caller defaults to largest-area) if nothing
     /// overlaps meaningfully -- e.g. the candidate box is missing, or every
     /// OFRSNet detection genuinely is a different object.
-    static func bestMatchVehicleID(candidateBBox: CGRect?, vehicles: [VehicleSummary],
+    public static func bestMatchVehicleID(candidateBBox: CGRect?, vehicles: [VehicleSummary],
                                    minDice: Double = 0.3) -> Int? {
         guard let candidateBBox, candidateBBox.width > 0, candidateBBox.height > 0 else { return nil }
         let candidateArea = candidateBBox.width * candidateBBox.height
@@ -84,7 +84,7 @@ enum ParkingMetrics {
         "van": "van", "vehicle": "kendaraan",
     ]
 
-    static func label(for rawLabel: String) -> String {
+    public static func label(for rawLabel: String) -> String {
         labelTranslations[rawLabel.lowercased()] ?? rawLabel.capitalized
     }
 }

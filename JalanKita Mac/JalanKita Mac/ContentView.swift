@@ -31,6 +31,7 @@
 //
 
 import SwiftUI
+import JalanKitaKit
 
 struct ContentView: View {
     @State private var model = AppModel()

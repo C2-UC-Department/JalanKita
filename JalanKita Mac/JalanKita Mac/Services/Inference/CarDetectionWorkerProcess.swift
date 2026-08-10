@@ -30,6 +30,7 @@
 //
 
 import Foundation
+import JalanKitaKit
 
 enum CarDetectionError: Error, LocalizedError {
     case workerNotFound(detail: String)

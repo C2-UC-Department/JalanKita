@@ -4,6 +4,7 @@
 //
 
 import Foundation
+import JalanKitaKit
 
 enum AppSection: String, Identifiable, Hashable {
     case sessionInbox

@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import JalanKitaKit
 
 @main
 struct JalanKita_MacApp: App {

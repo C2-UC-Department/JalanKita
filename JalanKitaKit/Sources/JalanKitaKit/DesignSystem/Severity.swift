@@ -1,23 +1,27 @@
 //
 //  Severity.swift
-//  JalanKita Mac
+//  JalanKitaKit
 //
 //  The severity language is the app's primary information carrier — see
 //  MOBILE_APP_METAPROMPT.md §5. Every grade pairs a colour with a distinct
 //  shape/icon so it survives greyscale printing and colourblindness, and
 //  every colour is tuned to stay legible sitting on top of map tiles.
 //
+//  Shared verbatim between JalanKita Mac and JalanKita iOS so the severity
+//  language reads identically on both — see the design brief's requirement
+//  to "design it once, carefully, and reuse it identically everywhere."
+//
 
 import SwiftUI
 
-enum Severity: String, CaseIterable, Identifiable {
+public enum Severity: String, CaseIterable, Identifiable, Codable, Sendable {
     case urgent   // SEGERA · condition score < 40
     case monitor  // PANTAU · 40–69
     case ignore   // ABAIKAN · ≥ 70
 
-    var id: String { rawValue }
+    public var id: String { rawValue }
 
-    var label: String {
+    public var label: String {
         switch self {
         case .urgent: "SEGERA"
         case .monitor: "PANTAU"
@@ -25,7 +29,7 @@ enum Severity: String, CaseIterable, Identifiable {
         }
     }
 
-    var scoreRange: String {
+    public var scoreRange: String {
         switch self {
         case .urgent: "< 40"
         case .monitor: "40–69"
@@ -33,7 +37,7 @@ enum Severity: String, CaseIterable, Identifiable {
         }
     }
 
-    var meaning: String {
+    public var meaning: String {
         switch self {
         case .urgent: "Risiko kecelakaan atau struktural. Selesaikan secepatnya."
         case .monitor: "Perlu dipantau. Survei ulang siklus berikutnya."
@@ -42,7 +46,7 @@ enum Severity: String, CaseIterable, Identifiable {
     }
 
     /// A distinct shape per grade so the encoding survives greyscale and deuteranopia.
-    var symbolName: String {
+    public var symbolName: String {
         switch self {
         case .urgent: "diamond.fill"
         case .monitor: "triangle.fill"
@@ -50,7 +54,7 @@ enum Severity: String, CaseIterable, Identifiable {
         }
     }
 
-    var literalColor: Color {
+    public var literalColor: Color {
         switch self {
         case .urgent: Color(red: 0.86, green: 0.15, blue: 0.24)
         case .monitor: Color(red: 0.93, green: 0.60, blue: 0.10)
@@ -60,7 +64,7 @@ enum Severity: String, CaseIterable, Identifiable {
 
     /// Route-line dash pattern so grades are distinguishable on a zoomed-out
     /// map even without colour — see §5, "works at three sizes."
-    var lineDash: [CGFloat] {
+    public var lineDash: [CGFloat] {
         switch self {
         case .urgent: []
         case .monitor: [7, 5]
@@ -68,7 +72,7 @@ enum Severity: String, CaseIterable, Identifiable {
         }
     }
 
-    init(score: Int) {
+    public init(score: Int) {
         switch score {
         case ..<40: self = .urgent
         case 40..<70: self = .monitor
@@ -79,11 +83,11 @@ enum Severity: String, CaseIterable, Identifiable {
 
 /// A small grade badge — diamond/triangle/circle + label — reused identically
 /// across list rows, map legends, and hero labels per the design brief.
-struct SeverityBadge: View {
+public struct SeverityBadge: View {
     let severity: Severity
     var size: Size = .regular
 
-    enum Size {
+    public enum Size {
         case compact, regular, large
 
         var font: Font {
@@ -111,7 +115,12 @@ struct SeverityBadge: View {
         }
     }
 
-    var body: some View {
+    public init(severity: Severity, size: Size = .regular) {
+        self.severity = severity
+        self.size = size
+    }
+
+    public var body: some View {
         Label {
             Text(severity.label)
                 .font(size.font)

@@ -1,23 +1,25 @@
 //
 //  DefectType.swift
-//  JalanKita Mac
+//  JalanKitaKit
 //
 //  The defect-type language is orthogonal to Severity (see §5): it encodes
 //  *what* kind of finding this is, not how bad it is, so it must read
 //  distinctly from severity colours when both sit on the same frame.
 //
+//  Shared verbatim between JalanKita Mac and JalanKita iOS.
+//
 
 import SwiftUI
 
-enum DefectType: String, CaseIterable, Identifiable {
+public enum DefectType: String, CaseIterable, Identifiable, Codable, Sendable {
     case pothole      // Lubang
     case alligator    // Retak kulit buaya (fatigue cracking)
     case crack        // Retak garis (linear crack)
     case blockedPark  // Parkir mengganggu — not a road defect, shares the overlay language
 
-    var id: String { rawValue }
+    public var id: String { rawValue }
 
-    var label: String {
+    public var label: String {
         switch self {
         case .pothole: "Lubang"
         case .alligator: "Retak kulit buaya"
@@ -26,7 +28,7 @@ enum DefectType: String, CaseIterable, Identifiable {
         }
     }
 
-    var color: Color {
+    public var color: Color {
         switch self {
         case .pothole: Color(red: 0.51, green: 0.38, blue: 0.93)
         case .alligator: Color(red: 0.55, green: 0.78, blue: 0.25)
@@ -36,7 +38,7 @@ enum DefectType: String, CaseIterable, Identifiable {
     }
 
     /// Fill pattern so type reads distinctly from Severity even in mono.
-    var pattern: MaskPattern {
+    public var pattern: MaskPattern {
         switch self {
         case .pothole: .solid
         case .alligator: .crosshatch
@@ -45,18 +47,23 @@ enum DefectType: String, CaseIterable, Identifiable {
         }
     }
 
-    enum MaskPattern {
+    public enum MaskPattern: Sendable {
         case solid, crosshatch, diagonalLines, outline
     }
 }
 
 /// A small legend swatch showing the fill pattern used to overlay this
 /// defect type as a translucent mask on a video frame.
-struct DefectSwatch: View {
+public struct DefectSwatch: View {
     let type: DefectType
     var size: CGFloat = 14
 
-    var body: some View {
+    public init(type: DefectType, size: CGFloat = 14) {
+        self.type = type
+        self.size = size
+    }
+
+    public var body: some View {
         MaskPatternShape(pattern: type.pattern)
             .fill(type.color, style: FillStyle())
             .overlay(
@@ -70,10 +77,14 @@ struct DefectSwatch: View {
 
 /// Renders the fill pattern itself, reused between legend swatches and the
 /// full-size mask overlays drawn on a reviewed frame.
-struct MaskPatternShape: Shape {
+public struct MaskPatternShape: Shape {
     let pattern: DefectType.MaskPattern
 
-    func path(in rect: CGRect) -> Path {
+    public init(pattern: DefectType.MaskPattern) {
+        self.pattern = pattern
+    }
+
+    public func path(in rect: CGRect) -> Path {
         switch pattern {
         case .solid:
             return Path(roundedRect: rect, cornerRadius: rect.width * 0.15)

@@ -10,6 +10,7 @@
 //
 
 import SwiftUI
+import JalanKitaKit
 
 struct FilmstripView: View {
     let frame: ReviewFrame

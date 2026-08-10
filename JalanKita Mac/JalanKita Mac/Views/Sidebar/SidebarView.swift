@@ -11,6 +11,7 @@
 //
 
 import SwiftUI
+import JalanKitaKit
 
 struct SidebarView: View {
     var model: AppModel

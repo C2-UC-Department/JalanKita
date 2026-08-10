@@ -15,6 +15,7 @@
 //
 
 import Foundation
+import JalanKitaKit
 
 enum InferenceWorkerError: Error, LocalizedError {
     case workerNotFound

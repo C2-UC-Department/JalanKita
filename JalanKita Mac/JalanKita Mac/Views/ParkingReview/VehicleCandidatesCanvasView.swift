@@ -11,6 +11,7 @@
 //
 
 import SwiftUI
+import JalanKitaKit
 
 struct VehicleCandidatesCanvasView: View {
     let analysis: ParkingAnalysis

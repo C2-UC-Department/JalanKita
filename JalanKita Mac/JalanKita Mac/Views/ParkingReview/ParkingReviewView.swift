@@ -16,6 +16,7 @@
 //
 
 import SwiftUI
+import JalanKitaKit
 
 struct ParkingReviewView: View {
     var model: AppModel

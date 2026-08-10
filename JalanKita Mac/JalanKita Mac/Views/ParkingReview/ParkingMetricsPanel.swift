@@ -11,6 +11,7 @@
 //
 
 import SwiftUI
+import JalanKitaKit
 
 struct ParkingMetricsPanel: View {
     let analysis: ParkingAnalysis

@@ -13,6 +13,7 @@
 
 import Foundation
 import CoreGraphics
+import JalanKitaKit
 
 enum DummySegmentation {
 

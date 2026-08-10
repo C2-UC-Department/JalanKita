@@ -19,6 +19,7 @@
 //
 
 import Foundation
+import JalanKitaKit
 
 struct CarDetectionResult {
     let summary: CarDetectionSummary

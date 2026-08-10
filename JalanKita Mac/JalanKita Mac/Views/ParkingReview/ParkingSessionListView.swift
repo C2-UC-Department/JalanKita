@@ -11,6 +11,7 @@
 //
 
 import SwiftUI
+import JalanKitaKit
 
 struct ParkingSessionListView: View {
     let model: AppModel

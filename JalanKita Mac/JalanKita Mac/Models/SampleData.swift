@@ -11,6 +11,7 @@
 import Foundation
 import CoreGraphics
 import CoreLocation
+import JalanKitaKit
 
 enum Surveyors {
     static let budi = Surveyor(id: "budi", name: "Budi Santoso")

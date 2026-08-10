@@ -25,6 +25,7 @@
 //
 
 import SwiftUI
+import JalanKitaKit
 
 struct ReviewFindingsView: View {
     var model: AppModel
