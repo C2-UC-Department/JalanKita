@@ -41,11 +41,20 @@ struct ReviewFindingsPanel: View {
                     }
 
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("\(frame.segmentLabel) · \(frame.kmMarker)")
+                        Text(placeLine)
                             .font(.system(size: 15, weight: .semibold))
-                        Text("\(frame.coordinate) · ±\(frame.gpsAccuracyM) m · frame \(frame.frameNumber)")
+                        Text(provenanceLine)
                             .font(.data(11.5))
                             .foregroundStyle(.secondary)
+                        // Not a soft caveat: without a GPS track this frame cannot be
+                        // placed on the map at all, and a reviewer who assumes otherwise
+                        // will file a work order against the wrong stretch of road.
+                        if frame.coordinate == nil {
+                            Label("Tanpa jejak GPS — frame ini tidak dapat dipetakan",
+                                  systemImage: "location.slash")
+                                .font(.caption2)
+                                .foregroundStyle(.yellow)
+                        }
                     }
 
                     VStack(alignment: .leading, spacing: 10) {
@@ -131,6 +140,23 @@ struct ReviewFindingsPanel: View {
         .foregroundStyle(.white)
     }
 
+    /// Segment/km binning needs a GPS log to exist; until then the honest unit of
+    /// location is the clip the frame came from.
+    private var placeLine: String {
+        let parts = [frame.segmentLabel, frame.kmMarker].compactMap { $0 }
+        return parts.isEmpty ? frame.sourceClip : parts.joined(separator: " · ")
+    }
+
+    private var provenanceLine: String {
+        var parts = ["frame \(frame.frameNumber)", frame.timecode]
+        if let coordinate = frame.coordinate {
+            parts.insert(coordinate, at: 0)
+            if let accuracy = frame.gpsAccuracyM { parts.insert("±\(accuracy) m", at: 1) }
+        }
+        if let capturedAt = frame.capturedAt { parts.append(capturedAt) }
+        return parts.joined(separator: " · ")
+    }
+
     private func decide() {
         guard let id = selectedFindingID else { return }
         reviewedIDs.insert(id)
@@ -178,9 +204,14 @@ struct FindingCard: View {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundStyle(.green)
             }
-            Text(String(format: "%.2f", finding.confidence))
-                .font(.data(13, weight: .semibold))
-                .foregroundStyle(.secondary)
+            // No confidence column exists in the YOLO label files, so a finding read
+            // from those has none. Show nothing rather than a stand-in number.
+            if let confidence = finding.confidence {
+                Text(confidence.formatted(
+                    .number.locale(Locale(identifier: "id_ID")).precision(.fractionLength(2))))
+                    .font(.data(13, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding(12)
         .background(isSelected ? Color.white.opacity(0.1) : Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))

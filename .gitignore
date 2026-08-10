@@ -1,0 +1,18 @@
+# Root .gitignore.
+#
+# The three Python subprojects keep their own (PythonWorker/, CarDetection/,
+# RoadDamage/); this file covers the repo root and the Xcode project.
+
+# Claude-written markdown — kept local, not shared.
+#
+# Note for whoever clones this next: the repo's working rules, its ADR record and
+# its what's-real-vs-mock status all live in these files, so a fresh clone gets
+# none of that context. The architecture reasoning they carry (ADR-015/016: why
+# road damage ships boxes not segmentation, why severity is computed only in
+# Python, why there are three incompatible venvs) is not recoverable from the
+# diff. Ask the repo owner for a copy rather than reconstructing it.
+CLAUDE.md
+JOURNAL.md
+PROGRESS.md
+ROAD_DAMAGE_BRIEF.md
+.claude

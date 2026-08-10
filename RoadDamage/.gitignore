@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+
+# Run outputs. CarDetection/.gitignore lacks an equivalent rule and has had run
+# artifacts committed by accident twice (PROGRESS.md gap 8) — this is that lesson,
+# applied up front rather than after the fact.
+outputs/
+*.jpg
+*.png
