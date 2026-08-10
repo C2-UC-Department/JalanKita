@@ -19,8 +19,14 @@
 //  deliberately mirrors SessionInboxView.processBatch()'s existing pattern
 //  (flip a Session's status, then set `selection`) rather than inventing a
 //  second navigation mechanism. On success it lands on "Tinjauan Parkir"
-//  (parkingAnalyses), never Peninjauan (reviewFrame) — that screen stays
-//  purely DummySegmentation-driven, untouched by real uploads.
+//  (parkingAnalyses), never Peninjauan (reviewQueue) — the two verticals stay
+//  separate all the way down, and the road-damage one is fed by
+//  `loadRoadDamageQueue()` / `analyzeRoadDamage(url:)` instead.
+//
+//  Peninjauan's queue is STATE, not a constant. It starts empty and is filled
+//  by a loader, so "0 dari 0" is a real thing the UI must render — the previous
+//  version stored a single always-present dummy frame with hardcoded 12/41
+//  counters, which meant the empty case had never once been exercised.
 //
 
 import Foundation
@@ -33,9 +39,39 @@ final class AppModel {
     var sessions: [Session] = SampleData.sessions
     var segments: [SegmentResult] = SampleData.segments
 
-    /// Randomized each launch — see DummySegmentation.swift. Peninjauan's
-    /// road-damage findings are entirely dummy; real uploads never touch this.
-    var reviewFrame: ReviewFrame = DummySegmentation.makeReviewFrame()
+    /// Peninjauan's review queue — real detector output, loaded from disk by
+    /// `RoadDamageDataset`. Empty until `loadRoadDamageQueue()` runs (and stays
+    /// empty if the dataset isn't present), so every consumer must handle zero
+    /// frames. Position in this array IS the queue counter; nothing stores one.
+    var reviewQueue: [ReviewFrame] = []
+
+    /// Which frame the reviewer is on. Held as an id rather than an index so a
+    /// reload that changes the queue's length can't silently point at a
+    /// different frame than the one that was on screen.
+    var reviewSelectionID: ReviewFrame.ID?
+
+    /// Set when the queue includes frames the detector found nothing in. Off by
+    /// default: 722 of 958 real frames are clean, and paging through them is not
+    /// a review workflow. Toggleable from Peninjauan so the clean-frame render
+    /// path stays exercisable at runtime.
+    var reviewIncludesCleanFrames: Bool = false
+
+    /// Non-fatal problems from the last queue load — surfaced in the log rather
+    /// than thrown away, per the app's "degrade, don't die" rule.
+    var reviewLoadWarnings: [String] = []
+
+    var reviewFrame: ReviewFrame? {
+        guard let reviewSelectionID else { return reviewQueue.first }
+        return reviewQueue.first { $0.id == reviewSelectionID } ?? reviewQueue.first
+    }
+
+    /// 1-based position of the current frame, or nil when the queue is empty.
+    /// Derived on every read — this is what replaced the hardcoded "12 dari 41".
+    var reviewQueuePosition: Int? {
+        guard let frame = reviewFrame,
+              let index = reviewQueue.firstIndex(where: { $0.id == frame.id }) else { return nil }
+        return index + 1
+    }
 
     /// Real parking-disturbance results, keyed by session id — "Tinjauan
     /// Parkir"'s data. A single manual photo upload produces exactly one
@@ -57,6 +93,23 @@ final class AppModel {
 
     private let inferenceService = InferenceService.shared
     private let carDetectionService = CarDetectionService.shared
+    private let roadDamageService = RoadDamageService.shared
+
+    /// True while a live road-damage analysis is running, so Peninjauan can
+    /// disable its upload action instead of queueing a second request behind the
+    /// first (the worker handles one at a time).
+    var isAnalyzingRoadDamage: Bool = false
+
+    /// The reason the last live road-damage analysis failed, or nil.
+    ///
+    /// The log line alone was not enough. `analyzeRoadDamage` deliberately treats
+    /// a worker failure as non-fatal and only appended to `logLines` — but the log
+    /// console lives on a DIFFERENT screen (Antrean), so from Peninjauan a failed
+    /// analysis was indistinguishable from one that never started. The most likely
+    /// failure by far is "no `.venv` on this machine", which must be legible where
+    /// the reviewer actually is. Set alongside the log line, never instead of it:
+    /// the log stays the durable record, this is the transient alert.
+    var roadDamageError: String?
 
     /// The Session currently being analyzed, so worker progress events (which
     /// carry no session id of their own) update only that row's queue
@@ -84,6 +137,9 @@ final class AppModel {
         carDetectionService.onProgress = { [weak self] progress in
             self?.applyCarDetectionProgress(progress)
         }
+        roadDamageService.onProgress = { [weak self] line in
+            self?.applyRoadDamageProgress(line)
+        }
     }
 
     var queuedSessions: [Session] {
@@ -94,8 +150,13 @@ final class AppModel {
         sessions.filter(\.selectedForBatch).count
     }
 
+    /// Findings across the whole queue that nobody has accepted or rejected yet.
+    /// Counted from the queue's actual contents — it used to be `41 - reviewed`,
+    /// with 41 being a number no data ever produced.
     var unreviewedFindingsCount: Int {
-        max(41 - reviewedFindingIDs.count, 0)
+        reviewQueue.reduce(0) { total, frame in
+            total + frame.findings.filter { !reviewedFindingIDs.contains($0.id) }.count
+        }
     }
 
     var surveyorCount: Int {
@@ -115,6 +176,137 @@ final class AppModel {
     func toggleBatchSelection(for sessionID: Session.ID) {
         guard let index = sessions.firstIndex(where: { $0.id == sessionID }) else { return }
         sessions[index].selectedForBatch.toggle()
+    }
+
+    // MARK: - Peninjauan (road damage)
+
+    /// Fills the review queue from the detector output already on disk.
+    ///
+    /// Synchronous on purpose: three CSVs totalling well under a megabyte, parsed
+    /// once when the screen appears. Wrapping this in a Task would add a window
+    /// where the view renders an empty queue that is about to become non-empty —
+    /// a flash of the "tidak ada antrean" state for data that was always there.
+    ///
+    /// A missing dataset is NOT an error state: the queue simply stays empty and
+    /// the reason lands in the log. UI-only work must not require the sibling
+    /// checkout, same principle as the Python toolchain rule.
+    func loadRoadDamageQueue() {
+        do {
+            let result = try RoadDamageDataset.load(includeClean: reviewIncludesCleanFrames)
+            reviewQueue = result.frames
+            reviewLoadWarnings = result.warnings
+
+            // Keep the reviewer where they were if that frame survived the reload
+            // (toggling clean frames on and off is the common case).
+            if let current = reviewSelectionID, result.frames.contains(where: { $0.id == current }) {
+                reviewSelectionID = current
+            } else {
+                reviewSelectionID = result.frames.first?.id
+            }
+
+            for warning in result.warnings {
+                appendLog(warning, isWarning: true)
+            }
+            appendLog("Antrean peninjauan dimuat: \(result.frames.count) frame dari "
+                      + "\(result.totalFramesInDataset) (\(result.cleanFrameCount) tanpa temuan).",
+                      isWarning: false)
+        } catch {
+            reviewQueue = []
+            reviewSelectionID = nil
+            reviewLoadWarnings = [error.localizedDescription]
+            appendLog(error.localizedDescription, isWarning: true)
+        }
+    }
+
+    func setReviewIncludesCleanFrames(_ includeClean: Bool) {
+        guard includeClean != reviewIncludesCleanFrames else { return }
+        reviewIncludesCleanFrames = includeClean
+        loadRoadDamageQueue()
+    }
+
+    func selectReviewFrame(id: ReviewFrame.ID) {
+        guard reviewQueue.contains(where: { $0.id == id }) else { return }
+        reviewSelectionID = id
+    }
+
+    /// Steps the queue by `offset`, clamped at both ends — no wraparound, so the
+    /// reviewer can tell when they've reached the end of the work.
+    func stepReviewFrame(by offset: Int) {
+        guard !reviewQueue.isEmpty,
+              let current = reviewQueuePosition else { return }
+        let target = min(max(current - 1 + offset, 0), reviewQueue.count - 1)
+        reviewSelectionID = reviewQueue[target].id
+    }
+
+    /// Stage 1: run the detector live on a photo and put the result at the FRONT
+    /// of the review queue.
+    ///
+    /// Front, not back, because the reviewer just chose this image and expects to
+    /// land on it. Re-analysing the same file replaces its existing entry rather
+    /// than adding a duplicate — `ReviewFrame.id` is the filename stem for exactly
+    /// that reason.
+    ///
+    /// A failure is never fatal: the queue keeps whatever it already had, the
+    /// reason goes to the log *and* to `roadDamageError` for an alert on the
+    /// screen the reviewer is actually looking at, and the screen stays usable.
+    /// That matters more here than in the other verticals, because the most likely
+    /// failure is "no worker venv on this machine", which must not look like a
+    /// broken app — nor, as it did before `roadDamageError` existed, like nothing
+    /// happened at all.
+    func analyzeRoadDamage(url: URL) {
+        guard !isAnalyzingRoadDamage else { return }
+        isAnalyzingRoadDamage = true
+        roadDamageError = nil
+        appendLog("Menganalisis kerusakan jalan: \(url.lastPathComponent)…", isWarning: false)
+
+        Task {
+            defer { isAnalyzingRoadDamage = false }
+            do {
+                let frame = try await roadDamageService.analyze(imageURL: url)
+                reviewQueue.removeAll { $0.id == frame.id }
+                reviewQueue.insert(frame, at: 0)
+                reviewSelectionID = frame.id
+                selection = .review
+                appendLog("Selesai: \(frame.findings.count) temuan · skor \(frame.score) "
+                          + "(\(frame.severity.label)) pada \(url.lastPathComponent).",
+                          isWarning: false)
+            } catch {
+                appendLog(error.localizedDescription, isWarning: true)
+                roadDamageError = error.localizedDescription
+            }
+        }
+    }
+
+    /// Worker stderr -> log. Progress events are folded into a single line per
+    /// stage rather than replayed verbatim: this pipeline has two stages and
+    /// finishes in seconds, so a step-by-step tracker would be more chrome than
+    /// information (the video path, which takes minutes, earns one).
+    private func applyRoadDamageProgress(_ line: RoadDamageStderrLine) {
+        switch line {
+        case .event(let event):
+            if event.type == "error", let error = event.error {
+                appendLog("Worker kerusakan jalan: \(error)", isWarning: true)
+            } else if event.type == "progress", event.state == "done", let stage = event.stage {
+                appendLog("Tahap \(stage) selesai.", isWarning: false)
+            }
+        case .raw(let text):
+            // Only surface the worker's own tagged lines; Ultralytics chatter and
+            // torch warnings would otherwise flood the log.
+            if text.hasPrefix("[warn]") || text.hasPrefix("[ok]") || text.hasPrefix("[device]") {
+                appendLog(text, isWarning: text.hasPrefix("[warn]"))
+            }
+        }
+    }
+
+    func shutdownServices() async {
+        await roadDamageService.shutdown()
+    }
+
+    private func appendLog(_ message: String, isWarning: Bool) {
+        logLines.insert(LogLine(time: Self.logTimeFormatter.string(from: Date()),
+                                message: message,
+                                isWarning: isWarning),
+                        at: 0)
     }
 
     /// Called from ProcessingQueueView's "Unggah foto…" toolbar action.

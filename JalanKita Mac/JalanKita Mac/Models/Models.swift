@@ -63,11 +63,22 @@ struct Finding: Identifiable, Hashable {
     var areaSqm: Double?
     var percentOfSurface: Double?
     var vehicleNote: String?
-    var confidence: Double
+
+    /// Detector confidence, or nil when the source didn't record one.
+    ///
+    /// Optional because provenance varies and a fabricated 0.87 is worse than a
+    /// missing chip: the YOLO `.txt` labels under `data/local_prelabeled/labels/`
+    /// are geometry only (`class cx cy w h`), so anything read from them has no
+    /// confidence at all. Real values arrive via `outputs/quantify/per_box.csv`,
+    /// the sidecar `quantify_damage.py` writes precisely to carry this.
+    var confidence: Double?
+
     var mappedFromNote: String?
 
-    /// Normalized (0...1) placement + extent used to draw the mask/box
-    /// over the mock frame illustration.
+    /// Normalized (0...1) placement + extent used to draw the mask/box over the
+    /// frame. Fed directly from the detector's normalized YOLO `xywh`, converted
+    /// centre-origin -> top-left-origin by `RoadDamageDataset`. Per ADR-015 this
+    /// vertical ships boxes, not masks, so there is deliberately no mask field.
     var frameRect: CGRect
 }
 
@@ -77,26 +88,62 @@ struct SeverityDeduction: Identifiable, Hashable {
     let points: Int
 }
 
-/// A reviewed frame: the unit of work on the Peninjauan Temuan screen. Purely
-/// DummySegmentation-driven (road-damage findings only) — real
-/// parking-disturbance results go to ParkingAnalysis/"Tinjauan Parkir" instead.
+/// A reviewed frame: the unit of work on the Peninjauan Temuan screen. Real
+/// road-damage findings (YOLO11s boxes, ADR-015) — parking-disturbance results
+/// go to ParkingAnalysis/"Tinjauan Parkir" instead.
+///
+/// Every field here has a source on disk. Where one doesn't exist the field is
+/// optional and renders as "tidak tersedia" rather than carrying an invented
+/// value — `indexInQueue`/`totalInQueue` are gone entirely (they were hardcoded
+/// 12/41 and are now derived from the queue's actual contents), and `coordinate`
+/// / `gpsAccuracyM` are nil because `frames_provenance.csv` records
+/// `gps_source=none` with empty lat/lon for all 958 Surabaya frames.
 struct ReviewFrame: Identifiable, Hashable {
     let id: String
-    let roadName: String
-    let indexInQueue: Int
-    let totalInQueue: Int
+
+    /// The clip this frame was sampled from, e.g. "IMG_0040.MOV" — stands in for
+    /// a road name, which no source on disk actually knows.
+    let sourceClip: String
+
+    /// Real values from `frames_provenance.csv`: the decoder's own frame index
+    /// and presentation timestamp, not a formatted guess.
     let frameNumber: String
     let timecode: String
+    let capturedAt: String?
+
     let severity: Severity
     let score: Int
+
+    /// True while the score comes from a detector that has never been validated
+    /// against Indonesian box labels — see the domain-gap caveat in ADR-015.
     let isProvisional: Bool
-    let segmentLabel: String
-    let kmMarker: String
-    let coordinate: String
-    let gpsAccuracyM: Int
+
+    /// nil until a GPS log exists; segment/km binning needs one (severity.yaml's
+    /// `segment_length_m` is unreachable without it).
+    let segmentLabel: String?
+    let kmMarker: String?
+    let coordinate: String?
+    let gpsAccuracyM: Int?
+
     let findings: [Finding]
+
+    /// `startScore` minus `deductions` lands exactly on `score`, because both
+    /// come from Python: `effective_deductions()` is the per-box split of the
+    /// same sum `grade_segment()` turns into `condition`. Nothing is recomputed
+    /// in Swift — the two implementations used to disagree (ADR-016).
     let startScore: Int
     let deductions: [SeverityDeduction]
+
+    /// The frame on disk, plus its recorded pixel size so the canvas can lock the
+    /// correct aspect ratio without decoding the image first.
+    let imageURL: URL
+    let imageWidth: Int
+    let imageHeight: Int
+
+    var aspectRatio: CGFloat {
+        guard imageWidth > 0, imageHeight > 0 else { return 3.0 / 4.0 }
+        return CGFloat(imageWidth) / CGFloat(imageHeight)
+    }
 }
 
 /// One session's real parking-disturbance analysis — the "Tinjauan Parkir"

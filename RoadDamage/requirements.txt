@@ -1,0 +1,13 @@
+# Road damage worker (Peninjauan) — Python dependencies
+#
+# ⚠️ This needs its OWN .venv. Do not install into PythonWorker/'s.
+# ultralytics resolves numpy 2.x; PythonWorker pins numpy<2.1 and the two cannot
+# coexist. That incompatibility is the entire reason this is a third worker
+# process rather than another request type on the disturbance worker (ADR-016).
+#
+# ultralytics pulls in torch, torchvision, opencv-python, numpy and pillow, so
+# they are not listed separately. On macOS (Apple Silicon) `pip install torch`
+# from the default PyPI index ships MPS-enabled wheels — no --index-url needed.
+
+ultralytics>=8.3.0     # YOLO11 detection
+pyyaml                 # severity.yaml

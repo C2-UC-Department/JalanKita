@@ -1,0 +1,55 @@
+# Severity / priority grading config — box-based, PCI-*informed*.
+#
+# Consumed by src/severity.py. Design + reasoning: SEVERITY_AND_COUNTING.md §2
+# (signals) and §4.1 (this file is the resolution of the "combine logic" open
+# decision → an interpretable, standards-anchored deduction table).
+#
+# NOTE on "PCI-informed": condition is a 0–100 score (100 = intact) whose grade
+# bands are *informed by* ASTM D6433 condition ranges. It is NOT a compliant PCI
+# survey — D6433 grades stationary sample units, not a moving-vehicle pass. Say
+# "PCI-informed", never "PCI-compliant". (See SEVERITY_AND_COUNTING.md §2 caveat.)
+#
+# Every number here is tunable with NO code edits, and must be CALIBRATED against
+# ~50 Dr.-Indrawan-graded images before it drives "resolve ASAP" (SEVERITY_AND_COUNTING.md §2, §4.4).
+
+segment_length_m: 10          # X: road-binning length. Open decision §4.2 — tunable (5 / 10 / 20 m).
+
+# Per-class hazard deduction: PCI points a single full-size, wheel-path defect of
+# this class knocks off a perfect 100. Keys are the merged 3-class names (must match
+# ID_TO_NAME in scripts/convert_voc_to_yolo.py). The ORDER encodes the hazard ranking
+# that still needs Dr. Indrawan's sign-off (SEVERITY_AND_COUNTING.md §4.4).
+class_deduct:
+  pothole: 46     # highest — accident / structural failure risk
+  alligator: 15   # alligator / fatigue — structural fatigue
+  crack: 8        # linear crack (merged RDD D00 longitudinal + D10 transverse)
+# Calibration note: `pothole` is set high enough that a LARGE, near (big box) pothole
+# in the wheel-path reaches URGENT on its own, while a small/distant pothole stays
+# MONITOR — because box area is the only extent proxy (no depth). `crack` = 8 is the
+# midpoint of the old D00 (7) / D10 (9) deductions now that the split is merged.
+# Re-tune against Dr. Indrawan's ~50 graded images (SEVERITY_AND_COUNTING.md §2, §4.4).
+
+# Size scaling (box proxy; no depth — SEVERITY_AND_COUNTING.md §2 "weak" caveat):
+#   multiplier = floor + gain * min(box_area_fraction, cap)
+# box_area_fraction = box area ÷ frame area.
+size:
+  floor: 0.65
+  gain: 4.5
+  cap: 0.15
+
+# Position: a box whose centre sits in the lower-central frame is in the wheel-path
+# / near the vehicle → weighted up (SEVERITY_AND_COUNTING.md §2 position signal).
+wheelpath:
+  multiplier: 1.22
+  x_min: 0.25                 # normalized frame-x band treated as "central"
+  x_max: 0.75
+  y_min: 0.55                 # normalized frame-y threshold treated as "near / lower"
+
+# Density: additional defects OF THE SAME CLASS in one segment add with a
+# diminishing return (rank 0 full, rank i scaled by decay**i).
+density_decay: 0.82
+
+# Condition → priority grade (lower condition = worse). Informed by ASTM D6433 bands.
+grades:
+  ignore_min: 70              # condition >= 70            → IGNORE
+  monitor_min: 40            # 40 <= condition < 70       → MONITOR
+                              # condition < 40             → URGENT
