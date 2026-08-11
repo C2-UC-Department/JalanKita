@@ -52,8 +52,6 @@ struct SidebarView: View {
         case .sessionInbox: model.batchSelectedCount
         case .queue: model.queuedSessions.count
         case .review: model.unreviewedFindingsCount
-        case .videoDetection: model.isVideoProcessing ? 1 : 0
-        case .parkingReview: model.parkingReviewSessions.count
         case .surveyors: model.surveyorCount
         case .mapSegments, .reports, .calibration, .cloudSync: 0
         }

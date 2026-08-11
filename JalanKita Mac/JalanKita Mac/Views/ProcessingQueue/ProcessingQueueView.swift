@@ -7,33 +7,19 @@
 //  rows — selection, hover, and keyboard up/down navigation all come from
 //  the framework instead of being reimplemented with @State.
 //
-//  "Unggah foto…" is the entry point for the real parking-disturbance
-//  pipeline (AppModel.uploadImage). The picked file is copied into the
-//  app's own sandbox container (FileManager.temporaryDirectory) before being
-//  handed to AppModel/InferenceService: the security-scoped access
-//  `.fileImporter` grants is only valid for reads made by this (sandboxed)
-//  process, not for the separate disturbance-worker subprocess that will
-//  eventually open the path — staging a plain copy sidesteps that instead
-//  of trying to extend sandbox access to a child process.
-//
-//  Video upload (v13 car-detection) lives on its own screen now --
-//  Views/VideoDetection/VideoDetectionView.swift -- not here. An earlier
-//  version added a second "Unggah video…" toolbar button + fileImporter to
-//  THIS screen; the project owner asked for a dedicated section instead, so
-//  that upload action and result together read as one self-contained flow
-//  rather than split across this queue and Tinjauan Parkir.
+//  Pure queue/progress viewer, no upload entry point of its own — both
+//  "Unggah foto…" and "Unggah video…" live in Session Inbox's toolbar,
+//  since that's where sessions actually live; a session created by either
+//  upload shows up here automatically once its status flips to `.segmenting`.
 //
 
 import SwiftUI
-import UniformTypeIdentifiers
 import JalanKitaKit
 
 struct ProcessingQueueView: View {
     var model: AppModel
 
     @State private var selection: Session.ID?
-    @State private var showingImporter = false
-    @State private var importError: String?
 
     private var queue: [Session] { model.queuedSessions }
 
@@ -63,59 +49,12 @@ struct ProcessingQueueView: View {
         .navigationTitle("Antrean pemrosesan")
         .navigationSubtitle("\(queue.filter(isRunning).count) berjalan · \(queue.count - queue.filter(isRunning).count) menunggu")
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    showingImporter = true
-                } label: {
-                    Label("Unggah foto…", systemImage: "photo.badge.plus")
-                }
-            }
             ToolbarItem { Button("Jeda antrean") {} }
             ToolbarItem { Button("Log lengkap") {} }
-        }
-        .fileImporter(isPresented: $showingImporter, allowedContentTypes: [.image]) { result in
-            handleImport(result)
-        }
-        .alert("Unggah gagal", isPresented: .constant(importError != nil), presenting: importError) { _ in
-            Button("OK") { importError = nil }
-        } message: { message in
-            Text(message)
         }
         .onAppear {
             if selection == nil { selection = queue.first?.id }
         }
-    }
-
-    private func handleImport(_ result: Result<URL, Error>) {
-        switch result {
-        case .failure(let error):
-            importError = error.localizedDescription
-        case .success(let pickedURL):
-            guard pickedURL.startAccessingSecurityScopedResource() else {
-                importError = "Tidak bisa mengakses berkas yang dipilih."
-                return
-            }
-            defer { pickedURL.stopAccessingSecurityScopedResource() }
-            do {
-                let staged = try Self.stageForWorker(pickedURL)
-                model.uploadImage(url: staged)
-            } catch {
-                importError = error.localizedDescription
-            }
-        }
-    }
-
-    /// Copies the picked photo into `FileManager.temporaryDirectory` (inside
-    /// the app's own sandbox container) so `InferenceService`'s subprocess
-    /// worker can open it by a plain path — see the type-level doc comment.
-    private static func stageForWorker(_ sourceURL: URL) throws -> URL {
-        let stagingDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("uploads", isDirectory: true)
-        try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
-        let ext = sourceURL.pathExtension.isEmpty ? "jpg" : sourceURL.pathExtension
-        let destination = stagingDir.appendingPathComponent(UUID().uuidString).appendingPathExtension(ext)
-        try FileManager.default.copyItem(at: sourceURL, to: destination)
-        return destination
     }
 
     private func isRunning(_ session: Session) -> Bool {

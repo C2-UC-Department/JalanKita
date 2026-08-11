@@ -12,6 +12,7 @@
 //
 
 import SwiftUI
+import UniformTypeIdentifiers
 import JalanKitaKit
 
 struct SessionInboxView: View {
@@ -20,6 +21,9 @@ struct SessionInboxView: View {
     @State private var selection: Session.ID?
     @State private var searchText = ""
     @State private var sortOrder = [KeyPathComparator(\Session.roadName)]
+    @State private var showingPhotoImporter = false
+    @State private var showingVideoImporter = false
+    @State private var importError: String?
 
     private var filteredSessions: [Session] {
         let base = searchText.isEmpty
@@ -41,7 +45,7 @@ struct SessionInboxView: View {
                 .frame(minWidth: 560)
 
             if let selectedSession {
-                SessionDetailPanel(session: selectedSession)
+                SessionDetailPanel(session: selectedSession, model: model)
                     .frame(minWidth: 380, idealWidth: 420, maxWidth: 480)
             }
         }
@@ -57,10 +61,94 @@ struct SessionInboxView: View {
                 }
                 .disabled(model.batchSelectedCount == 0)
             }
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Button("Foto…") { showingPhotoImporter = true }
+                    Button("Video…") { showingVideoImporter = true }
+                } label: {
+                    Label("Unggah…", systemImage: "square.and.arrow.up")
+                }
+            }
+        }
+        .fileImporter(isPresented: $showingPhotoImporter, allowedContentTypes: [.image]) { result in
+            handlePhotoImport(result)
+        }
+        .fileImporter(isPresented: $showingVideoImporter, allowedContentTypes: [.movie]) { result in
+            handleVideoImport(result)
+        }
+        .alert("Unggah gagal", isPresented: .constant(importError != nil), presenting: importError) { _ in
+            Button("OK") { importError = nil }
+        } message: { message in
+            Text(message)
         }
         .onAppear {
             if selection == nil { selection = filteredSessions.first?.id }
         }
+    }
+
+    private func handlePhotoImport(_ result: Result<URL, Error>) {
+        switch result {
+        case .failure(let error):
+            importError = error.localizedDescription
+        case .success(let pickedURL):
+            guard pickedURL.startAccessingSecurityScopedResource() else {
+                importError = "Tidak bisa mengakses berkas yang dipilih."
+                return
+            }
+            defer { pickedURL.stopAccessingSecurityScopedResource() }
+            do {
+                let staged = try Self.stagePhotoForWorker(pickedURL)
+                model.uploadImage(url: staged)
+            } catch {
+                importError = error.localizedDescription
+            }
+        }
+    }
+
+    private func handleVideoImport(_ result: Result<URL, Error>) {
+        switch result {
+        case .failure(let error):
+            importError = error.localizedDescription
+        case .success(let pickedURL):
+            guard pickedURL.startAccessingSecurityScopedResource() else {
+                importError = "Tidak bisa mengakses berkas yang dipilih."
+                return
+            }
+            defer { pickedURL.stopAccessingSecurityScopedResource() }
+            do {
+                let staged = try Self.stageVideoForWorker(pickedURL)
+                model.uploadVideo(url: staged)
+            } catch {
+                importError = error.localizedDescription
+            }
+        }
+    }
+
+    /// Copies the picked photo into `FileManager.temporaryDirectory` (inside
+    /// the app's own sandbox container) so `InferenceService`'s subprocess
+    /// worker can open it by a plain path — the security-scoped access
+    /// `.fileImporter` grants is only valid for reads made by this
+    /// (sandboxed) process, not the separate worker subprocess.
+    private static func stagePhotoForWorker(_ sourceURL: URL) throws -> URL {
+        let stagingDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("uploads", isDirectory: true)
+        try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
+        let ext = sourceURL.pathExtension.isEmpty ? "jpg" : sourceURL.pathExtension
+        let destination = stagingDir.appendingPathComponent(UUID().uuidString).appendingPathExtension(ext)
+        try FileManager.default.copyItem(at: sourceURL, to: destination)
+        return destination
+    }
+
+    /// Same sandbox-staging reasoning as `stagePhotoForWorker`, for the v13
+    /// car-detection subprocess instead of the disturbance worker.
+    private static func stageVideoForWorker(_ sourceURL: URL) throws -> URL {
+        let stagingDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("video-uploads", isDirectory: true)
+        try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
+        let ext = sourceURL.pathExtension.isEmpty ? "mov" : sourceURL.pathExtension
+        let destination = stagingDir.appendingPathComponent(UUID().uuidString).appendingPathExtension(ext)
+        try FileManager.default.copyItem(at: sourceURL, to: destination)
+        return destination
     }
 
     /// Pinned above the table via `.safeAreaInset`, not stacked as a

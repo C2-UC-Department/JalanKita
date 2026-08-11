@@ -29,8 +29,16 @@ public struct ParkingAnalysis: Identifiable, Codable, Sendable {
     /// whether it was inside a sign's zone).
     public var carCandidate: CarCandidate?
 
+    /// Where in the *session's* overall timeline this candidate was
+    /// detected — not `carCandidate?.midSeconds`, which is relative to
+    /// whichever clip produced it (each clip gets its own fresh v13
+    /// tracking run starting at 0:00). nil for a manual photo upload, which
+    /// has no video timeline to place on.
+    public let sessionRelativeSeconds: Double?
+
     public init(id: String, sessionID: Session.ID, imageURL: URL, imageWidth: Int, imageHeight: Int,
-                summary: DisturbanceSummary, bevPNGPath: String? = nil, carCandidate: CarCandidate? = nil) {
+                summary: DisturbanceSummary, bevPNGPath: String? = nil, carCandidate: CarCandidate? = nil,
+                sessionRelativeSeconds: Double? = nil) {
         self.id = id
         self.sessionID = sessionID
         self.imageURL = imageURL
@@ -39,6 +47,7 @@ public struct ParkingAnalysis: Identifiable, Codable, Sendable {
         self.summary = summary
         self.bevPNGPath = bevPNGPath
         self.carCandidate = carCandidate
+        self.sessionRelativeSeconds = sessionRelativeSeconds
     }
 
     /// Vehicles with a measurable share, ranked by area descending —

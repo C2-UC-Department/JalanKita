@@ -42,6 +42,18 @@ struct ContentView: View {
         } detail: {
             NavigationStack {
                 detailView
+                    // Registered here, at the top of the NavigationStack,
+                    // not inside SessionInboxView's own body — that view's
+                    // root is an `HSplitView`, and this file's other
+                    // comments already document that nesting complex layout
+                    // containers directly under NavigationSplitView/
+                    // NavigationStack causes real SwiftUI/AppKit bugs on
+                    // macOS (previously seen as sidebar corruption; a
+                    // `.navigationDestination` attached inside one of those
+                    // panes is the same risky pattern one level deeper).
+                    .navigationDestination(for: Session.self) { session in
+                        ParkingVideoReviewView(session: session, model: model)
+                    }
             }
         }
         .navigationSplitViewStyle(.balanced)
@@ -64,10 +76,6 @@ struct ContentView: View {
             ProcessingQueueView(model: model)
         case .review:
             ReviewFindingsView(model: model)
-        case .videoDetection:
-            VideoDetectionView(model: model)
-        case .parkingReview:
-            ParkingReviewView(model: model)
         case .mapSegments:
             MapSegmentsView(model: model)
         case .cloudSync:

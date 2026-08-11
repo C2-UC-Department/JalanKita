@@ -15,6 +15,11 @@ import JalanKitaKit
 
 struct SessionDetailPanel: View {
     let session: Session
+    var model: AppModel
+
+    private var hasParkingResults: Bool {
+        !(model.parkingAnalyses[session.id]?.isEmpty ?? true)
+    }
 
     var body: some View {
         ScrollView {
@@ -71,9 +76,12 @@ struct SessionDetailPanel: View {
                         .buttonStyle(.borderedProminent)
                         .frame(maxWidth: .infinity)
 
-                    Button("Buka video") {}
-                        .buttonStyle(.bordered)
-                        .frame(maxWidth: .infinity)
+                    NavigationLink(value: session) {
+                        Text("Buka video")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(!hasParkingResults)
                 }
                 .controlSize(.large)
             }

@@ -24,6 +24,7 @@
 //
 
 import AppKit
+import AVFoundation
 import CloudKit
 import Foundation
 import Observation
@@ -33,7 +34,15 @@ import JalanKitaKit
 final class AppModel {
     var selection: AppSection = .sessionInbox
 
-    var sessions: [Session] = SampleData.sessions
+    /// Persisted to disk once any real session exists (upload or sync) —
+    /// falls back to `SampleData.sessions` only on a genuinely first launch.
+    /// Previously in-memory only, which meant a crash or relaunch silently
+    /// erased every uploaded/synced session with no way back to it — not
+    /// just an inconvenience, but the thing that made a "Buka Video" crash
+    /// unreproducible after the app quit.
+    var sessions: [Session] = AppModel.loadSessions() ?? SampleData.sessions {
+        didSet { Self.saveSessions(sessions) }
+    }
     var segments: [SegmentResult] = SampleData.segments
 
     /// Randomized each launch — see DummySegmentation.swift. Peninjauan's
@@ -45,8 +54,11 @@ final class AppModel {
     /// element; a video upload (uploadVideo, via v13) can produce zero to
     /// many, one per car v13 found parked. `var` array elements so
     /// `selectParkingVehicle` can update a specific analysis's `bevPNGPath`
-    /// in place after each re-render.
-    var parkingAnalyses: [Session.ID: [ParkingAnalysis]] = [:]
+    /// in place after each re-render. Persisted alongside `sessions`, for
+    /// the same reason.
+    var parkingAnalyses: [Session.ID: [ParkingAnalysis]] = AppModel.loadParkingAnalyses() {
+        didSet { Self.saveParkingAnalyses(parkingAnalyses) }
+    }
 
     /// `var`, not `let` — SampleData.pipelineSteps is the at-rest/default
     /// state; `uploadImage(url:)` resets to it per run and then drives it
@@ -66,12 +78,12 @@ final class AppModel {
 
     /// Zones for surveyors this Mac has ingested at least one real synced
     /// session from — lets a manually-uploaded video (`uploadVideo`, no GPS
-    /// of its own) still be pushed to a specific surveyor's iPhone
-    /// afterward, for testing the iOS Parking Report screen against real
-    /// street footage without needing to drive around with the phone.
-    /// Keyed by surveyor display name, since that's what the "kirim ke
-    /// iPhone" picker shows. Only populated once a real session has synced
-    /// from that surveyor — that's how this Mac learns the zone exists.
+    /// of its own) still automatically reach an iPhone afterward (see
+    /// `pushCompletedManualUploads`), for testing the iOS Parking Report
+    /// screen against real street footage without needing to drive around
+    /// with the phone. Keyed by surveyor display name. Only populated once
+    /// a real session has synced from that surveyor — that's how this Mac
+    /// learns the zone exists.
     ///
     /// Persisted to disk (unlike `sessions`, which is not): CloudKit's
     /// change feed only ever redelivers a record once, so on a fresh
@@ -88,26 +100,10 @@ final class AppModel {
     /// progress — not any of SampleData's unrelated dummy `.segmenting` rows.
     private var activeUploadSessionID: String?
 
-    /// The most recent video uploaded via `uploadVideo` -- VideoDetectionView's
-    /// entire "Hasil pemrosesan terbaru" section is keyed off this one id, so
-    /// upload action and result read as one self-contained screen instead of
-    /// needing a trip through Antrean + a separate Tinjauan Parkir lookup.
-    var latestVideoSessionID: Session.ID?
-
-    /// True exactly while the most recent video upload's pipeline (v13, then
-    /// OFRSNet per candidate) is still running -- distinct from `activeUploadSessionID`
-    /// alone, since a manual PHOTO upload (uploadImage) also sets that same
-    /// property and would otherwise read as "video still processing" too.
-    var isVideoProcessing: Bool {
-        latestVideoSessionID != nil && activeUploadSessionID == latestVideoSessionID
-    }
-
     init() {
         surveyorZones = Self.loadSurveyorZones()
         cloudKitSyncEngine = CloudKitSyncEngine(appSupportDir: Self.appSupportDir())
-        syncedSessionIngestor = SyncedSessionIngestor(
-            workDir: Self.appSupportDir().appendingPathComponent("synced-sessions", isDirectory: true)
-        )
+        syncedSessionIngestor = SyncedSessionIngestor(workDir: Self.syncedSessionsDir())
 
         inferenceService.onProgress = { [weak self] line in
             self?.applyProgress(line)
@@ -134,7 +130,39 @@ final class AppModel {
     /// phase (see the phase plan), so this is the only way changes
     /// actually move between the Mac and CloudKit.
     func syncNow() async {
+        pushCompletedManualUploads()
         await cloudKitSyncEngine.syncNow()
+    }
+
+    /// Session IDs from a manual upload (uploadImage/uploadVideo) already
+    /// pushed to iCloud this run — avoids re-pushing identical records on
+    /// every syncNow(). Persisted, now that `sessions` is too: without this,
+    /// every relaunch would re-upload the same images/BEV assets for every
+    /// already-pushed session on its first sync.
+    private var manualUploadsPushed: Set<Session.ID> = AppModel.loadManualUploadsPushed() {
+        didSet { Self.saveManualUploadsPushed(manualUploadsPushed) }
+    }
+
+    /// Any manually-uploaded (not iPhone-recorded) session that's finished
+    /// processing gets pushed to every surveyor zone this Mac knows about —
+    /// no picking who to send it to. `recordedDate == nil` is the existing,
+    /// already-reliable signal that a session came from `uploadImage`/
+    /// `uploadVideo` rather than a real iPhone recording (those always set
+    /// it). With today's single-surveyor testing this broadcast is
+    /// equivalent to "the" zone; multi-surveyor semantics may need
+    /// revisiting once that's actually exercised.
+    private func pushCompletedManualUploads() {
+        guard !surveyorZones.isEmpty else { return }
+        for session in sessions
+        where session.recordedDate == nil && session.status == .done && !manualUploadsPushed.contains(session.id) {
+            for zoneID in surveyorZones.values {
+                cloudKitSyncEngine.enqueueSessionUpdate(session, zoneID: zoneID)
+                for analysis in parkingAnalyses[session.id] ?? [] {
+                    pushParkingResult(analysis, zoneID: zoneID)
+                }
+            }
+            manualUploadsPushed.insert(session.id)
+        }
     }
 
     var queuedSessions: [Session] {
@@ -153,22 +181,12 @@ final class AppModel {
         Set(sessions.map(\.surveyor.id)).count
     }
 
-    /// Sessions with a real stored analysis — not `status == .done` broadly,
-    /// since SampleData's dummy "done" video sessions have no ParkingAnalysis
-    /// and would show up as broken empty rows in Tinjauan Parkir otherwise.
-    /// A video with zero PARKED-family cars deliberately leaves its session
-    /// out of this list too (an empty array is a real, successful "nothing
-    /// to review" result, not a broken row, but there's nothing to show).
-    var parkingReviewSessions: [Session] {
-        sessions.filter { !(parkingAnalyses[$0.id]?.isEmpty ?? true) }
-    }
-
     func toggleBatchSelection(for sessionID: Session.ID) {
         guard let index = sessions.firstIndex(where: { $0.id == sessionID }) else { return }
         sessions[index].selectedForBatch.toggle()
     }
 
-    /// Called from ProcessingQueueView's "Unggah foto…" toolbar action.
+    /// Called from Session Inbox's "Unggah…" toolbar menu.
     func uploadImage(url: URL) {
         let sessionID = "upload-\(UUID().uuidString.prefix(8))"
         let session = Session(
@@ -225,7 +243,7 @@ final class AppModel {
                 bevPNGPath: result.bevPNGPath,
                 carCandidate: nil
             )]
-            selection = .parkingReview
+            selection = .sessionInbox
         } catch {
             activeUploadSessionID = nil
             updateSessionStatus(sessionID, .failed(reason: error.localizedDescription))
@@ -235,7 +253,7 @@ final class AppModel {
         }
     }
 
-    /// Called from ProcessingQueueView's "Unggah video…" toolbar action —
+    /// Called from Session Inbox's "Unggah…" toolbar menu —
     /// the real end-to-end pipeline: v13 finds every car it classifies as
     /// PARKED (any STOP_CLASS in that family, including the depth tiebreak —
     /// not filtered down to only the ones inside a sign's zone, since
@@ -247,6 +265,13 @@ final class AppModel {
     /// integration pass, not a throughput-tuned one.
     func uploadVideo(url: URL) {
         let sessionID = "video-\(UUID().uuidString.prefix(8))"
+        // Copies out of the OS temp directory `SessionInboxView`'s
+        // `.fileImporter` staged it into — that directory can be purged by
+        // macOS at any time, so anything that wants this video later
+        // (Tinjauan Parkir's player) needs it somewhere durable. Falls back
+        // to the original staged URL if the copy fails; the pipeline can
+        // still run against it this once, it just won't be replayable later.
+        let durableURL = Self.copyToManualUploadsDir(sourceURL: url, sessionID: sessionID) ?? url
         let session = Session(
             id: sessionID,
             roadName: url.deletingPathExtension().lastPathComponent,
@@ -261,23 +286,30 @@ final class AppModel {
             gpsAccuracyM: nil,
             gpsHz: nil,
             gpsGapNote: nil,
-            sizeGB: Self.fileSizeGB(at: url),
+            sizeGB: Self.fileSizeGB(at: durableURL),
             status: .segmenting(progress: 0),
             segmentCount: nil,
             selectedForBatch: false
         )
         sessions.append(session)
         activeUploadSessionID = sessionID
-        latestVideoSessionID = sessionID
         pipelineSteps = Self.videoPipelineSteps
-        selection = .videoDetection
+        selection = .queue
 
         Task {
-            await runVideoAnalysis(sessionID: sessionID, videoURL: url)
+            await runVideoAnalysis(sessionID: sessionID, videoURL: durableURL)
         }
     }
 
     private func runVideoAnalysis(sessionID: String, videoURL: URL) async {
+        // Needed so the Tinjauan Parkir timeline has a real total width to
+        // render against — `uploadVideo`'s placeholder Session otherwise
+        // leaves `durationSeconds` nil (it has no GPS-derived duration the
+        // way a synced session does).
+        if let duration = await Self.probeDurationSeconds(url: videoURL),
+           let index = sessions.firstIndex(where: { $0.id == sessionID }) {
+            sessions[index].durationSeconds = duration
+        }
         do {
             pipelineSteps[0].state = .active
             let workDir = Self.carDetectionWorkDir(sessionID: sessionID)
@@ -313,7 +345,7 @@ final class AppModel {
                         id: requestID, sessionID: sessionID, imageURL: imagePath,
                         imageWidth: result.imageWidth, imageHeight: result.imageHeight,
                         summary: result.summary, bevPNGPath: result.bevPNGPath,
-                        carCandidate: candidate
+                        carCandidate: candidate, sessionRelativeSeconds: candidate.midSeconds
                     ))
                 } catch {
                     logLines.insert(LogLine(
@@ -329,10 +361,9 @@ final class AppModel {
             activeUploadSessionID = nil
             updateSessionStatus(sessionID, analyses.isEmpty ? .failed(reason: "Semua analisis OFRSNet gagal.") : .done)
             parkingAnalyses[sessionID] = analyses
-            // No forced navigation here (unlike uploadImage's plain-photo path) --
-            // VideoDetectionView is already showing this session's progress and
-            // will reactively switch to showing `analyses` once `isVideoProcessing`
-            // flips false, so the user never leaves the screen they started on.
+            if !analyses.isEmpty {
+                selection = .sessionInbox
+            }
         } catch {
             activeUploadSessionID = nil
             updateSessionStatus(sessionID, .failed(reason: error.localizedDescription))
@@ -365,12 +396,23 @@ final class AppModel {
     }
 
     private func runSyncedSessionAnalysis(sessionID: String, clipURLs: [URL], zoneID: CKRecordZone.ID) async {
-        var candidatePairs: [(candidate: CarCandidate, screenshotDir: URL)] = []
+        // Each clip's own v13 tracking run reports frame/second numbers
+        // relative to that clip alone (starting at 0:00) — this cumulative
+        // offset array is what turns those clip-relative numbers into one
+        // consistent session timeline for Tinjauan Parkir.
+        var clipOffsets: [Double] = []
+        var cumulativeOffset: Double = 0
+        for clipURL in clipURLs {
+            clipOffsets.append(cumulativeOffset)
+            cumulativeOffset += await Self.probeDurationSeconds(url: clipURL) ?? 0
+        }
+
+        var candidatePairs: [(candidate: CarCandidate, screenshotDir: URL, clipIndex: Int)] = []
         for (clipIndex, clipURL) in clipURLs.enumerated() {
             let workDir = Self.carDetectionWorkDir(sessionID: "\(sessionID)-clip\(clipIndex)")
             do {
                 let detection = try await carDetectionService.detect(video: clipURL, workDir: workDir)
-                candidatePairs += detection.summary.carsDetectedParked.map { ($0, detection.screenshotDir) }
+                candidatePairs += detection.summary.carsDetectedParked.map { ($0, detection.screenshotDir, clipIndex) }
             } catch {
                 logLines.insert(LogLine(
                     time: Self.logTimeFormatter.string(from: Date()),
@@ -397,7 +439,8 @@ final class AppModel {
                 let analysis = ParkingAnalysis(
                     id: requestID, sessionID: sessionID, imageURL: imagePath,
                     imageWidth: result.imageWidth, imageHeight: result.imageHeight,
-                    summary: result.summary, bevPNGPath: result.bevPNGPath, carCandidate: pair.candidate
+                    summary: result.summary, bevPNGPath: result.bevPNGPath, carCandidate: pair.candidate,
+                    sessionRelativeSeconds: clipOffsets[pair.clipIndex] + pair.candidate.midSeconds
                 )
                 analyses.append(analysis)
                 pushParkingResult(analysis, zoneID: zoneID)
@@ -444,24 +487,6 @@ final class AppModel {
         cloudKitSyncEngine.enqueueParkingResult(result, zoneID: zoneID, imageFileURL: analysis.imageURL, bevFileURL: bevURL)
     }
 
-    /// Pushes a manually-uploaded video's session + parking results (see
-    /// `uploadVideo`) into a known surveyor's zone, so their iPhone can
-    /// fetch them too — the fallback path for verifying iOS's Parking
-    /// Report screen against real street footage without a live GPS
-    /// recording. The pushed Session still carries `Self.operatorSurveyor`
-    /// as its surveyor field (it genuinely wasn't recorded by that
-    /// surveyor) — filed under their zone, but honestly labeled as this
-    /// Mac's own upload, not attributed to them.
-    func syncManualUpload(sessionID: String, toSurveyorNamed surveyorName: String) {
-        guard let zoneID = surveyorZones[surveyorName],
-              let session = sessions.first(where: { $0.id == sessionID }) else { return }
-        cloudKitSyncEngine.enqueueSessionUpdate(session, zoneID: zoneID)
-        for analysis in parkingAnalyses[sessionID] ?? [] {
-            pushParkingResult(analysis, zoneID: zoneID)
-        }
-        Task { await syncNow() }
-    }
-
     /// Called when the user taps a different vehicle overlay in Tinjauan
     /// Parkir: re-renders the BEV highlighting that vehicle's share, for one
     /// specific analysis (a session can hold several since uploadVideo).
@@ -501,6 +526,38 @@ final class AppModel {
             ?? FileManager.default.temporaryDirectory
     }
 
+    /// `~/Library/Application Support/JalanKita Mac/synced-sessions/` — where
+    /// `SyncedSessionIngestor` copies each synced session's clip files to.
+    /// Exposed (not private) so `SessionVideoAssetBuilder` can look those
+    /// same clips back up for Tinjauan Parkir's video player, without
+    /// duplicating this path as a second magic string.
+    static func syncedSessionsDir() -> URL {
+        appSupportDir().appendingPathComponent("synced-sessions", isDirectory: true)
+    }
+
+    /// `~/Library/Application Support/JalanKita Mac/manual-uploads/<sessionID>/`
+    /// — durable home for a manually-uploaded video, mirroring
+    /// `syncedSessionsDir()`'s reasoning for synced clips.
+    static func manualUploadsDir(sessionID: String) -> URL {
+        appSupportDir()
+            .appendingPathComponent("manual-uploads", isDirectory: true)
+            .appendingPathComponent(sessionID, isDirectory: true)
+    }
+
+    private static func copyToManualUploadsDir(sourceURL: URL, sessionID: String) -> URL? {
+        let dir = manualUploadsDir(sessionID: sessionID)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let ext = sourceURL.pathExtension.isEmpty ? "mov" : sourceURL.pathExtension
+        let destination = dir.appendingPathComponent("video").appendingPathExtension(ext)
+        try? FileManager.default.removeItem(at: destination)
+        do {
+            try FileManager.default.copyItem(at: sourceURL, to: destination)
+            return destination
+        } catch {
+            return nil
+        }
+    }
+
     /// `CKRecordZone.ID` isn't `Codable` — persisted as its two constituent
     /// strings instead.
     private struct PersistedZone: Codable {
@@ -523,6 +580,52 @@ final class AppModel {
         let persisted = zones.mapValues { PersistedZone(zoneName: $0.zoneName, ownerName: $0.ownerName) }
         guard let data = try? JSONEncoder().encode(persisted) else { return }
         try? data.write(to: surveyorZonesFileURL, options: .atomic)
+    }
+
+    private static var sessionsFileURL: URL { appSupportDir().appendingPathComponent("sessions.json") }
+
+    /// nil (not an empty array) when nothing's been persisted yet, so the
+    /// `sessions` property initializer can fall back to `SampleData.sessions`
+    /// on a genuinely first launch instead of showing an empty list.
+    private static func loadSessions() -> [Session]? {
+        guard let data = try? Data(contentsOf: sessionsFileURL),
+              let sessions = try? JSONDecoder().decode([Session].self, from: data),
+              !sessions.isEmpty
+        else { return nil }
+        return sessions
+    }
+
+    private static func saveSessions(_ sessions: [Session]) {
+        guard let data = try? JSONEncoder().encode(sessions) else { return }
+        try? data.write(to: sessionsFileURL, options: .atomic)
+    }
+
+    private static var parkingAnalysesFileURL: URL { appSupportDir().appendingPathComponent("parking_analyses.json") }
+
+    private static func loadParkingAnalyses() -> [Session.ID: [ParkingAnalysis]] {
+        guard let data = try? Data(contentsOf: parkingAnalysesFileURL),
+              let analyses = try? JSONDecoder().decode([Session.ID: [ParkingAnalysis]].self, from: data)
+        else { return [:] }
+        return analyses
+    }
+
+    private static func saveParkingAnalyses(_ analyses: [Session.ID: [ParkingAnalysis]]) {
+        guard let data = try? JSONEncoder().encode(analyses) else { return }
+        try? data.write(to: parkingAnalysesFileURL, options: .atomic)
+    }
+
+    private static var manualUploadsPushedFileURL: URL { appSupportDir().appendingPathComponent("manual_uploads_pushed.json") }
+
+    private static func loadManualUploadsPushed() -> Set<Session.ID> {
+        guard let data = try? Data(contentsOf: manualUploadsPushedFileURL),
+              let ids = try? JSONDecoder().decode(Set<String>.self, from: data)
+        else { return [] }
+        return ids
+    }
+
+    private static func saveManualUploadsPushed(_ ids: Set<Session.ID>) {
+        guard let data = try? JSONEncoder().encode(ids) else { return }
+        try? data.write(to: manualUploadsPushedFileURL, options: .atomic)
     }
 
     /// v13's own two natural stages, coarser than the disturbance worker's
@@ -568,6 +671,11 @@ final class AppModel {
     private func updateSessionStatus(_ sessionID: String, _ status: SessionStatus) {
         guard let index = sessions.firstIndex(where: { $0.id == sessionID }) else { return }
         sessions[index].status = status
+    }
+
+    private static func probeDurationSeconds(url: URL) async -> Double? {
+        guard let duration = try? await AVURLAsset(url: url).load(.duration) else { return nil }
+        return duration.seconds
     }
 
     private static func fileSizeGB(at url: URL) -> Double {
