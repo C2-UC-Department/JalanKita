@@ -5,3 +5,4 @@ build/
 dist/
 *.spec.bak
 data/disturbance/
+hf_cache_staging/

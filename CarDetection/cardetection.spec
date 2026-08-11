@@ -63,7 +63,14 @@ a = Analysis(
     # even though pipeline_v13.py's own code never touches training/plotting.
     # Confirmed via a real frozen build: excluding it crashed with
     # ModuleNotFoundError before pipeline_v13 even finished importing.
-    excludes=["pandas", "streamlit", "IPython", "notebook", "pytest"],
+    #
+    # polars IS excluded, unlike matplotlib: confirmed via grep that every
+    # `import polars` inside ultralytics is local to a function body (its own
+    # comment: "scope for faster 'import ultralytics'"), reachable only from
+    # plotting/benchmark/wandb-callback utilities pipeline_v13.py never calls
+    # -- collect_all("ultralytics") pulled it in as a static dependency
+    # anyway. 183 MB removed for a library that's never imported at runtime.
+    excludes=["pandas", "streamlit", "IPython", "notebook", "pytest", "polars"],
     noarchive=False,
     optimize=0,
 )

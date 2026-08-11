@@ -36,7 +36,15 @@ if [ -d "$TORCH_HUB_SRC" ]; then
     echo "[build_cardetection] staging torch.hub cache from $TORCH_HUB_SRC"
     rm -rf torch_hub_cache
     mkdir -p torch_hub_cache
-    rsync -a --exclude ".seeded" "$TORCH_HUB_SRC/" torch_hub_cache/
+    # hustvl_YOLOP_main/ is a full git-clone checkout, not just the weights --
+    # its own hubconf.py (checked directly) only ever loads weights/End-to-
+    # end.pth, so the 3 ONNX export variants and the repo's own README/demo
+    # assets are dead weight we'd otherwise ship for nothing (~123 MB).
+    rsync -a --exclude ".seeded" \
+        --exclude "hustvl_YOLOP_main/weights/*.onnx" \
+        --exclude "hustvl_YOLOP_main/pictures" \
+        --exclude "hustvl_YOLOP_main/inference" \
+        "$TORCH_HUB_SRC/" torch_hub_cache/
 else
     echo "[build_cardetection] warning: no $TORCH_HUB_SRC found -- YOLOP/MiDaS_small have never been" \
          "downloaded on this machine. Building without a bundled cache; the frozen app will need" \
