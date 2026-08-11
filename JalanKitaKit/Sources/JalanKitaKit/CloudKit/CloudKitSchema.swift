@@ -86,6 +86,7 @@ public enum CloudKitSchema {
         public static let session = "session"
         public static let sourceKind = "sourceKind"
         public static let carTrackID = "carTrackID"
+        public static let disturbance = "disturbance"
         public static let imageAsset = "imageAsset"
         public static let imageWidth = "imageWidth"
         public static let imageHeight = "imageHeight"

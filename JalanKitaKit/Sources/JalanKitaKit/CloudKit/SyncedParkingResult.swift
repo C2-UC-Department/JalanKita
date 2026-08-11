@@ -23,6 +23,9 @@ public struct SyncedParkingResult: Identifiable, Sendable {
     public let candidateID: String
     public var sourceKind: String
     public var carTrackID: Int?
+    /// Mirrors `CarCandidate.disturbance` (v13's own PARKED/violation call) —
+    /// nil for a manual photo upload, which has no `CarCandidate` behind it.
+    public var disturbance: Bool?
     public var imageWidth: Int
     public var imageHeight: Int
     public var summaryJSON: String
@@ -31,11 +34,12 @@ public struct SyncedParkingResult: Identifiable, Sendable {
     public var id: String { "\(sessionID)#\(candidateID)" }
 
     public init(sessionID: String, candidateID: String, sourceKind: String, carTrackID: Int? = nil,
-                imageWidth: Int, imageHeight: Int, summaryJSON: String, createdAt: Date = Date()) {
+                disturbance: Bool? = nil, imageWidth: Int, imageHeight: Int, summaryJSON: String, createdAt: Date = Date()) {
         self.sessionID = sessionID
         self.candidateID = candidateID
         self.sourceKind = sourceKind
         self.carTrackID = carTrackID
+        self.disturbance = disturbance
         self.imageWidth = imageWidth
         self.imageHeight = imageHeight
         self.summaryJSON = summaryJSON
@@ -53,6 +57,7 @@ extension SyncedParkingResult: CKRecordConvertible {
         )
         record[CloudKitSchema.ParkingResultField.sourceKind] = sourceKind as CKRecordValue
         record[CloudKitSchema.ParkingResultField.carTrackID] = carTrackID as CKRecordValue?
+        record[CloudKitSchema.ParkingResultField.disturbance] = disturbance as CKRecordValue?
         record[CloudKitSchema.ParkingResultField.imageWidth] = imageWidth as CKRecordValue
         record[CloudKitSchema.ParkingResultField.imageHeight] = imageHeight as CKRecordValue
         record[CloudKitSchema.ParkingResultField.summaryJSON] = summaryJSON as CKRecordValue
@@ -75,6 +80,7 @@ extension SyncedParkingResult: CKRecordConvertible {
             candidateID: candidateID,
             sourceKind: sourceKind,
             carTrackID: record[CloudKitSchema.ParkingResultField.carTrackID] as? Int,
+            disturbance: record[CloudKitSchema.ParkingResultField.disturbance] as? Bool,
             imageWidth: imageWidth,
             imageHeight: imageHeight,
             summaryJSON: summaryJSON,

@@ -16,16 +16,6 @@
 		FFF8A927A65B7C679A376B62 /* JalanKita iOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "JalanKita iOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
-/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		4E6CB16C302ABDEE00D821AC /* Exceptions for "JalanKita iOS" folder in "JalanKita iOS" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				"JalanKita-iOS-Info.plist",
-			);
-			target = F61B9E57E5F0A34ECEB9AD4B /* JalanKita iOS */;
-		};
-/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
-
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		4EBA2FE53021C3AE004B0D93 /* JalanKita Mac */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
@@ -34,9 +24,6 @@
 		};
 		E98C00477ED448DC61655BBD /* JalanKita iOS */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-				4E6CB16C302ABDEE00D821AC /* Exceptions for "JalanKita iOS" folder in "JalanKita iOS" target */,
-			);
 			path = "JalanKita iOS";
 			sourceTree = "<group>";
 		};

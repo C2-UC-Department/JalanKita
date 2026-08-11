@@ -135,7 +135,12 @@ struct VideoDetectionView: View {
                                       + "mobil yang diklasifikasikan PARKED di video ini.")
                 )
             } else {
-                doneResult
+                VStack(alignment: .leading, spacing: 12) {
+                    if !model.surveyorZones.isEmpty {
+                        sendToPhoneMenu(sessionID: session.id)
+                    }
+                    doneResult
+                }
             }
         case .failed(let reason):
             Label {
@@ -163,6 +168,23 @@ struct VideoDetectionView: View {
                 }
             }
         }
+    }
+
+    /// Manual test bridge to CloudKit — see `AppModel.syncManualUpload`.
+    /// Only shown once at least one real session has synced from a
+    /// surveyor, since that's how this Mac learns their zone exists at all.
+    private func sendToPhoneMenu(sessionID: String) -> some View {
+        Menu {
+            ForEach(model.surveyorZones.keys.sorted(), id: \.self) { name in
+                Button(name) {
+                    model.syncManualUpload(sessionID: sessionID, toSurveyorNamed: name)
+                }
+            }
+        } label: {
+            Label("Kirim ke iPhone…", systemImage: "icloud.and.arrow.up")
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
     }
 
     private var doneResult: some View {

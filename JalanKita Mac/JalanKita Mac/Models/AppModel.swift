@@ -64,6 +64,25 @@ final class AppModel {
     let cloudKitSyncEngine: CloudKitSyncEngine
     private let syncedSessionIngestor: SyncedSessionIngestor
 
+    /// Zones for surveyors this Mac has ingested at least one real synced
+    /// session from — lets a manually-uploaded video (`uploadVideo`, no GPS
+    /// of its own) still be pushed to a specific surveyor's iPhone
+    /// afterward, for testing the iOS Parking Report screen against real
+    /// street footage without needing to drive around with the phone.
+    /// Keyed by surveyor display name, since that's what the "kirim ke
+    /// iPhone" picker shows. Only populated once a real session has synced
+    /// from that surveyor — that's how this Mac learns the zone exists.
+    ///
+    /// Persisted to disk (unlike `sessions`, which is not): CloudKit's
+    /// change feed only ever redelivers a record once, so on a fresh
+    /// launch a previously-ingested surveyor's zone would otherwise be
+    /// unrecoverable — the sync engine's change token has already moved
+    /// past that Session record, and nothing will ever refetch it just to
+    /// repopulate this map.
+    var surveyorZones: [String: CKRecordZone.ID] = [:] {
+        didSet { Self.saveSurveyorZones(surveyorZones) }
+    }
+
     /// The Session currently being analyzed, so worker progress events (which
     /// carry no session id of their own) update only that row's queue
     /// progress — not any of SampleData's unrelated dummy `.segmenting` rows.
@@ -84,6 +103,7 @@ final class AppModel {
     }
 
     init() {
+        surveyorZones = Self.loadSurveyorZones()
         cloudKitSyncEngine = CloudKitSyncEngine(appSupportDir: Self.appSupportDir())
         syncedSessionIngestor = SyncedSessionIngestor(
             workDir: Self.appSupportDir().appendingPathComponent("synced-sessions", isDirectory: true)
@@ -337,6 +357,7 @@ final class AppModel {
         } else {
             sessions.append(session)
         }
+        surveyorZones[session.surveyor.name] = zoneID
         updateSessionStatus(session.id, .segmenting(progress: 0))
         Task {
             await runSyncedSessionAnalysis(sessionID: session.id, clipURLs: clipURLs, zoneID: zoneID)
@@ -363,6 +384,7 @@ final class AppModel {
             updateSessionStatus(sessionID, .done)
             parkingAnalyses[sessionID] = []
             pushSessionStatus(sessionID: sessionID, zoneID: zoneID)
+            await syncNow()
             return
         }
 
@@ -391,6 +413,13 @@ final class AppModel {
         updateSessionStatus(sessionID, analyses.isEmpty ? .failed(reason: "Semua analisis OFRSNet gagal.") : .done)
         parkingAnalyses[sessionID] = analyses
         pushSessionStatus(sessionID: sessionID, zoneID: zoneID)
+        // pushSessionStatus/pushParkingResult only stage records in
+        // CloudKitSyncEngine.outgoingRecords — nothing actually reaches the
+        // server until a syncNow() runs, and this Mac otherwise only syncs
+        // on launch or when it regains focus. Without this, results sit
+        // queued in memory indefinitely whenever the Mac stays frontmost
+        // through the whole analysis run (the common case).
+        await syncNow()
     }
 
     private func pushSessionStatus(sessionID: String, zoneID: CKRecordZone.ID) {
@@ -406,12 +435,31 @@ final class AppModel {
             candidateID: analysis.carCandidate.map { String($0.trackID) } ?? analysis.id,
             sourceKind: analysis.carCandidate != nil ? "videoCandidate" : "manual",
             carTrackID: analysis.carCandidate?.trackID,
+            disturbance: analysis.carCandidate?.disturbance,
             imageWidth: analysis.imageWidth,
             imageHeight: analysis.imageHeight,
             summaryJSON: summaryJSON
         )
         let bevURL = analysis.bevPNGPath.map { URL(fileURLWithPath: $0) }
         cloudKitSyncEngine.enqueueParkingResult(result, zoneID: zoneID, imageFileURL: analysis.imageURL, bevFileURL: bevURL)
+    }
+
+    /// Pushes a manually-uploaded video's session + parking results (see
+    /// `uploadVideo`) into a known surveyor's zone, so their iPhone can
+    /// fetch them too — the fallback path for verifying iOS's Parking
+    /// Report screen against real street footage without a live GPS
+    /// recording. The pushed Session still carries `Self.operatorSurveyor`
+    /// as its surveyor field (it genuinely wasn't recorded by that
+    /// surveyor) — filed under their zone, but honestly labeled as this
+    /// Mac's own upload, not attributed to them.
+    func syncManualUpload(sessionID: String, toSurveyorNamed surveyorName: String) {
+        guard let zoneID = surveyorZones[surveyorName],
+              let session = sessions.first(where: { $0.id == sessionID }) else { return }
+        cloudKitSyncEngine.enqueueSessionUpdate(session, zoneID: zoneID)
+        for analysis in parkingAnalyses[sessionID] ?? [] {
+            pushParkingResult(analysis, zoneID: zoneID)
+        }
+        Task { await syncNow() }
     }
 
     /// Called when the user taps a different vehicle overlay in Tinjauan
@@ -451,6 +499,30 @@ final class AppModel {
         (try? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
                                       appropriateFor: nil, create: true))
             ?? FileManager.default.temporaryDirectory
+    }
+
+    /// `CKRecordZone.ID` isn't `Codable` — persisted as its two constituent
+    /// strings instead.
+    private struct PersistedZone: Codable {
+        let zoneName: String
+        let ownerName: String
+    }
+
+    private static var surveyorZonesFileURL: URL {
+        appSupportDir().appendingPathComponent("surveyor_zones.json")
+    }
+
+    private static func loadSurveyorZones() -> [String: CKRecordZone.ID] {
+        guard let data = try? Data(contentsOf: surveyorZonesFileURL),
+              let persisted = try? JSONDecoder().decode([String: PersistedZone].self, from: data)
+        else { return [:] }
+        return persisted.mapValues { CKRecordZone.ID(zoneName: $0.zoneName, ownerName: $0.ownerName) }
+    }
+
+    private static func saveSurveyorZones(_ zones: [String: CKRecordZone.ID]) {
+        let persisted = zones.mapValues { PersistedZone(zoneName: $0.zoneName, ownerName: $0.ownerName) }
+        guard let data = try? JSONEncoder().encode(persisted) else { return }
+        try? data.write(to: surveyorZonesFileURL, options: .atomic)
     }
 
     /// v13's own two natural stages, coarser than the disturbance worker's

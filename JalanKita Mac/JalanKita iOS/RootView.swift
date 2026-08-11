@@ -10,7 +10,12 @@ struct RootView: View {
 
     var body: some View {
         if model.hasCompletedOnboarding {
-            HomeDashboardView()
+            TabView {
+                HomeDashboardView()
+                    .tabItem { Label("Beranda", systemImage: "house.fill") }
+                CoverageMapView()
+                    .tabItem { Label("Peta Cakupan", systemImage: "map.fill") }
+            }
         } else {
             OnboardingFlowView()
         }

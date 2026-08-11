@@ -34,6 +34,10 @@ protocol CloudKitSyncDataSource: AnyObject {
     /// A Session record came back from the cloud with fields the Mac owns
     /// (status, segmentCount) changed — apply it to local state.
     func applyIncomingSession(_ session: Session)
+    /// The Mac finished analyzing a parking candidate and pushed the result
+    /// back — image/BEV already copied to a stable local file by the sync
+    /// engine, ready to persist and display.
+    func applyIncomingParkingResult(_ result: DownloadedParkingResult)
 }
 
 @MainActor
@@ -49,6 +53,7 @@ final class CloudKitSyncEngine {
     private let zoneProvisionedKey: String
     private let changeTokenFileURL: URL
     private let syncStates: SessionSyncStateStore
+    private let appSupportDir: URL
 
     /// Records waiting for the next `syncNow()` to actually push them.
     /// Rebuilt from current local state at `enqueue*` time, not persisted
@@ -65,6 +70,7 @@ final class CloudKitSyncEngine {
         zoneProvisionedKey = "cloudkit_zone_provisioned_\(zoneName)"
         changeTokenFileURL = appSupportDir.appendingPathComponent("cloudkit_change_token_\(zoneName).data")
         self.syncStates = syncStates
+        self.appSupportDir = appSupportDir
         database = CKContainer(identifier: CloudKitSchema.containerIdentifier).privateCloudDatabase
         changeToken = Self.loadChangeToken(from: changeTokenFileURL)
     }
@@ -153,9 +159,70 @@ final class CloudKitSyncEngine {
     }
 
     private func applyFetchedRecord(_ record: CKRecord) {
-        guard record.recordType == CloudKitSchema.RecordType.session,
-              let session = Session(record: record) else { return }
-        dataSource?.applyIncomingSession(session)
+        switch record.recordType {
+        case CloudKitSchema.RecordType.session:
+            guard let session = Session(record: record) else { return }
+            dataSource?.applyIncomingSession(session)
+        case CloudKitSchema.RecordType.parkingResult:
+            guard let synced = SyncedParkingResult(record: record),
+                  let downloaded = downloadParkingResult(synced, record: record) else { return }
+            dataSource?.applyIncomingParkingResult(downloaded)
+        default:
+            // Clip/GPSTrack/CalibrationProfile records the iOS side wrote
+            // itself, and the schema-only SegmentResult stub — nothing to
+            // apply locally for either today.
+            break
+        }
+    }
+
+    /// Copies `imageAsset`/`bevAsset` off the fetched `CKRecord` to a stable
+    /// local file — a fetched `CKAsset`'s `fileURL` points at CloudKit's own
+    /// temporary copy, not guaranteed to outlive the record that referenced
+    /// it (same reasoning as the Mac's `SyncedSessionIngestor.copyAsset`).
+    private func downloadParkingResult(_ synced: SyncedParkingResult, record: CKRecord) -> DownloadedParkingResult? {
+        guard let imageAsset = record[CloudKitSchema.ParkingResultField.imageAsset] as? CKAsset,
+              let imageSourceURL = imageAsset.fileURL,
+              let summaryData = synced.summaryJSON.data(using: .utf8),
+              let summary = try? JSONDecoder().decode(DisturbanceSummary.self, from: summaryData)
+        else { return nil }
+
+        let dir = appSupportDir
+            .appendingPathComponent("ParkingResults", isDirectory: true)
+            .appendingPathComponent(synced.sessionID, isDirectory: true)
+            .appendingPathComponent(synced.candidateID, isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        guard let localImageURL = Self.copyAsset(from: imageSourceURL, to: dir.appendingPathComponent("image.jpg")) else { return nil }
+        var localBEVURL: URL?
+        if let bevAsset = record[CloudKitSchema.ParkingResultField.bevAsset] as? CKAsset,
+           let bevSourceURL = bevAsset.fileURL {
+            localBEVURL = Self.copyAsset(from: bevSourceURL, to: dir.appendingPathComponent("bev.png"))
+        }
+
+        return DownloadedParkingResult(
+            sessionID: synced.sessionID,
+            candidateID: synced.candidateID,
+            sourceKind: synced.sourceKind,
+            carTrackID: synced.carTrackID,
+            disturbance: synced.disturbance,
+            imageWidth: synced.imageWidth,
+            imageHeight: synced.imageHeight,
+            createdAt: synced.createdAt,
+            localImageURL: localImageURL,
+            localBEVURL: localBEVURL,
+            summary: summary
+        )
+    }
+
+    private static func copyAsset(from sourceURL: URL, to destinationURL: URL) -> URL? {
+        let fm = FileManager.default
+        try? fm.removeItem(at: destinationURL)
+        do {
+            try fm.copyItem(at: sourceURL, to: destinationURL)
+            return destinationURL
+        } catch {
+            return nil
+        }
     }
 
     // MARK: - Building records to send

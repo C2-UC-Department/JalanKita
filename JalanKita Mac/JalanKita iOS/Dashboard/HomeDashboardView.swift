@@ -9,6 +9,7 @@
 //
 
 import SwiftUI
+import UniformTypeIdentifiers
 import JalanKitaKit
 
 struct HomeDashboardView: View {
@@ -16,6 +17,8 @@ struct HomeDashboardView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var isRecording = false
     @State private var isPresentingSyncSetup = false
+    @State private var isImportingVideo = false
+    @State private var importError: String?
 
     var body: some View {
         NavigationStack {
@@ -33,6 +36,17 @@ struct HomeDashboardView: View {
                     .tint(.red)
                     .listRowInsets(EdgeInsets())
                     .padding(.vertical, 8)
+                    .padding(.horizontal)
+
+                    Button {
+                        isImportingVideo = true
+                    } label: {
+                        Label("Impor Video", systemImage: "square.and.arrow.down")
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 4)
+                    }
+                    .buttonStyle(.bordered)
+                    .listRowInsets(EdgeInsets())
                     .padding(.horizontal)
                 }
                 .listRowSeparator(.hidden)
@@ -57,6 +71,12 @@ struct HomeDashboardView: View {
                 }
             }
             .navigationTitle("JalanKita")
+            .navigationDestination(for: Session.self) { session in
+                SessionDetailView(session: session)
+            }
+            .navigationDestination(for: ParkingReportRoute.self) { route in
+                ParkingReportView(sessionID: route.sessionID)
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
@@ -83,6 +103,25 @@ struct HomeDashboardView: View {
             }
             .sheet(isPresented: $isPresentingSyncSetup) {
                 SyncSetupView()
+            }
+            .fileImporter(isPresented: $isImportingVideo, allowedContentTypes: [.movie]) { result in
+                switch result {
+                case .success(let url):
+                    Task {
+                        do {
+                            try await model.importVideo(from: url)
+                        } catch {
+                            importError = error.localizedDescription
+                        }
+                    }
+                case .failure(let error):
+                    importError = error.localizedDescription
+                }
+            }
+            .alert("Impor gagal", isPresented: .constant(importError != nil), presenting: importError) { _ in
+                Button("OK") { importError = nil }
+            } message: { message in
+                Text(message)
             }
             .onChange(of: scenePhase) { _, newPhase in
                 guard newPhase == .active else { return }
