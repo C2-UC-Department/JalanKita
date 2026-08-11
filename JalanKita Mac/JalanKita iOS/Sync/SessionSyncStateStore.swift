@@ -15,6 +15,7 @@
 //
 
 import Foundation
+import Observation
 
 enum SessionSyncStatus: String, Codable {
     case notSynced, uploading, synced, failed
@@ -29,7 +30,11 @@ struct SessionSyncState: Codable {
     static let initial = SessionSyncState(status: .notSynced, uploadedClipIndices: [], gpsTrackUploaded: false, lastError: nil)
 }
 
+/// `@Observable` so a sync-status badge in the UI (SessionRowView) updates
+/// live as `markUploading`/`markSynced`/etc. run during an in-flight sync,
+/// not just on the next full view rebuild.
 @MainActor
+@Observable
 final class SessionSyncStateStore {
     private let fileURL: URL
     private(set) var states: [String: SessionSyncState] = [:]

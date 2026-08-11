@@ -38,6 +38,34 @@ struct CloudSyncSettingsView: View {
             }
 
             Section {
+                if connectedSurveyors.isEmpty {
+                    Text("Belum ada sesi tersinkron dari surveyor manapun.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(connectedSurveyors) { surveyor in
+                        LabeledContent {
+                            Text("\(surveyor.sessionCount) sesi")
+                                .foregroundStyle(.secondary)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(surveyor.name)
+                                if let lastDate = surveyor.mostRecentRecordedDate {
+                                    Text("Terakhir: \(lastDate.formatted(date: .abbreviated, time: .shortened))")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                }
+            } header: {
+                Text("Surveyor terhubung")
+            } footer: {
+                Text("Daftar ini berasal dari sesi yang sudah tersinkron, bukan daftar undangan CKShare — belum ada pencarian peserta berbagi di layar ini.")
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
                 Button {
                     Task {
                         isSyncing = true
@@ -85,4 +113,30 @@ struct CloudSyncSettingsView: View {
             shareLinkText = ""
         }
     }
+
+    /// Derived from synced `Session` records rather than a `CKShare`
+    /// participant lookup — this app declares no contacts/discoverability
+    /// entitlement, and every surveyor whose sessions actually arrived is,
+    /// by definition, connected, which is the information that matters
+    /// here.
+    private var connectedSurveyors: [ConnectedSurveyor] {
+        let grouped = Dictionary(grouping: model.sessions.filter { $0.recordedDate != nil }, by: \.surveyor.id)
+        return grouped.values.compactMap { sessions in
+            guard let name = sessions.first?.surveyor.name else { return nil }
+            return ConnectedSurveyor(
+                id: sessions[0].surveyor.id,
+                name: name,
+                sessionCount: sessions.count,
+                mostRecentRecordedDate: sessions.compactMap(\.recordedDate).max()
+            )
+        }
+        .sorted { $0.name < $1.name }
+    }
+}
+
+private struct ConnectedSurveyor: Identifiable {
+    let id: String
+    let name: String
+    let sessionCount: Int
+    let mostRecentRecordedDate: Date?
 }
