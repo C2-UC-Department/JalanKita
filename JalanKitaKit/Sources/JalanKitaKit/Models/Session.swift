@@ -26,10 +26,20 @@ public struct Session: Identifiable, Hashable, Codable, Sendable {
     public var segmentCount: Int?
     public var selectedForBatch: Bool = false
 
+    /// Canonical values behind the `date`/`duration` display strings, used
+    /// for CloudKit sync and any locale-independent computation — `date`/
+    /// `duration` are pre-formatted for display and are NOT synced
+    /// verbatim (see `CloudKitSchema.SessionField`), so each platform can
+    /// format its own display string from these. `nil` for sessions that
+    /// predate this field (mock/manual-upload sessions) or haven't synced.
+    public var recordedDate: Date?
+    public var durationSeconds: Double?
+
     public init(id: String, roadName: String, kmMarker: String? = nil, date: String, surveyor: Surveyor,
                 clipCount: Int, duration: String, distanceKm: Double, gpsAccuracyM: Int? = nil,
                 gpsHz: Double? = nil, gpsGapNote: String? = nil, sizeGB: Double, status: SessionStatus,
-                segmentCount: Int? = nil, selectedForBatch: Bool = false) {
+                segmentCount: Int? = nil, selectedForBatch: Bool = false, recordedDate: Date? = nil,
+                durationSeconds: Double? = nil) {
         self.id = id
         self.roadName = roadName
         self.kmMarker = kmMarker
@@ -45,5 +55,7 @@ public struct Session: Identifiable, Hashable, Codable, Sendable {
         self.status = status
         self.segmentCount = segmentCount
         self.selectedForBatch = selectedForBatch
+        self.recordedDate = recordedDate
+        self.durationSeconds = durationSeconds
     }
 }

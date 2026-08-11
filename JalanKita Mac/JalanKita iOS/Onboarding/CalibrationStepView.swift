@@ -109,7 +109,8 @@ struct CalibrationStepView: View {
             mountLabel: mountLabel.isEmpty ? "Pemasangan tanpa nama" : mountLabel,
             knownWidthMeters: width,
             frameFilename: filename,
-            createdAt: Date()
+            createdAt: Date(),
+            surveyorID: model.surveyorName.isEmpty ? "unknown" : model.surveyorName
         )
         model.saveCalibration(profile)
         onFinish()

@@ -16,6 +16,7 @@ enum AppSection: String, Identifiable, Hashable {
     case reports
     case surveyors
     case calibration
+    case cloudSync
 
     var id: String { rawValue }
 
@@ -30,6 +31,7 @@ enum AppSection: String, Identifiable, Hashable {
         case .reports: "Laporan"
         case .surveyors: "Surveyor"
         case .calibration: "Model & kalibrasi"
+        case .cloudSync: "Sinkronisasi iCloud"
         }
     }
 
@@ -44,6 +46,7 @@ enum AppSection: String, Identifiable, Hashable {
         case .reports: "doc.text.fill"
         case .surveyors: "person.2.fill"
         case .calibration: "slider.horizontal.3"
+        case .cloudSync: "icloud.and.arrow.up.fill"
         }
     }
 
@@ -58,6 +61,6 @@ enum AppSection: String, Identifiable, Hashable {
     static let groups: [(Group, [AppSection])] = [
         (.pemrosesan, [.sessionInbox, .queue, .review, .videoDetection, .parkingReview]),
         (.hasil, [.mapSegments, .reports]),
-        (.lapangan, [.surveyors, .calibration]),
+        (.lapangan, [.surveyors, .calibration, .cloudSync]),
     ]
 }

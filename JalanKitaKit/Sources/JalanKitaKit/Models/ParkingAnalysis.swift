@@ -14,7 +14,7 @@
 
 import Foundation
 
-public struct ParkingAnalysis: Identifiable, Decodable, Sendable {
+public struct ParkingAnalysis: Identifiable, Codable, Sendable {
     public let id: String
     public let sessionID: Session.ID
     public let imageURL: URL

@@ -2,9 +2,10 @@
 //  HomeDashboardView.swift
 //  JalanKita iOS
 //
-//  §6.2 — minimal cut: Start Recording CTA + local session list. No sync
-//  status or road-condition summary tile yet — those need CloudKit
-//  (Phase 2/3), not built in this pass.
+//  §6.2 — minimal cut: Start Recording CTA + local session list. Sessions
+//  sync to CloudKit in the background (manual/foreground-triggered only in
+//  this phase — no push yet); the road-condition summary tile still needs
+//  the road-damage pipeline to exist, so it stays deferred.
 //
 
 import SwiftUI
@@ -12,6 +13,7 @@ import JalanKitaKit
 
 struct HomeDashboardView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.scenePhase) private var scenePhase
     @State private var isRecording = false
 
     var body: some View {
@@ -34,6 +36,14 @@ struct HomeDashboardView: View {
                 }
                 .listRowSeparator(.hidden)
 
+                if let error = model.syncEngine.lastError {
+                    Section("SINKRONISASI") {
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                            .font(.footnote)
+                    }
+                }
+
                 Section("SESI") {
                     if model.localSessions.isEmpty {
                         Text("Belum ada sesi terekam.")
@@ -46,8 +56,26 @@ struct HomeDashboardView: View {
                 }
             }
             .navigationTitle("JalanKita")
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        Task { await model.syncNow() }
+                    } label: {
+                        if model.syncEngine.isSyncing {
+                            ProgressView()
+                        } else {
+                            Label("Sinkronkan", systemImage: "arrow.triangle.2.circlepath")
+                        }
+                    }
+                    .disabled(model.syncEngine.isSyncing)
+                }
+            }
             .fullScreenCover(isPresented: $isRecording) {
                 ActiveRecordingView()
+            }
+            .onChange(of: scenePhase) { _, newPhase in
+                guard newPhase == .active else { return }
+                Task { await model.syncNow() }
             }
         }
     }

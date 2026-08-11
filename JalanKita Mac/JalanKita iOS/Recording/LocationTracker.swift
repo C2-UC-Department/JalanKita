@@ -39,8 +39,21 @@ final class LocationTracker: NSObject {
     private var lastLocation: CLLocation?
     private var lastFixDate: Date?
     private var staleCheckTimer: Timer?
+    /// Consecutive fixes in a row with accuracy worse than
+    /// `accuracyThresholdMeters` — degradation requires several bad fixes
+    /// back to back before it's real, not a single noisy one. A lone fix
+    /// >=30m is routine (common right after `startUpdatingLocation()`
+    /// before the chain settles, or briefly under trees/overpasses) and
+    /// flagging every one of those as a "GPS interruption" made nearly
+    /// every real session read as degraded, which defeats the point of
+    /// that status meaning something went actually wrong.
+    private var consecutiveBadFixes = 0
 
     private static let isoFormatter = ISO8601DateFormatter()
+    private static let accuracyThresholdMeters = 50.0
+    private static let requiredConsecutiveBadFixes = 3
+    private static let staleDegradedSeconds: TimeInterval = 6
+    private static let staleLostSeconds: TimeInterval = 20
 
     override init() {
         authorizationStatus = .notDetermined
@@ -67,6 +80,7 @@ final class LocationTracker: NSObject {
         pointCount = 0
         distanceMeters = 0
         degradedEpisodeCount = 0
+        consecutiveBadFixes = 0
         lastLocation = nil
         lastFixDate = nil
         trackCoordinates = []
@@ -95,9 +109,9 @@ final class LocationTracker: NSObject {
         guard let lastFixDate else { return }
         let age = Date().timeIntervalSince(lastFixDate)
         let previousState = state
-        if age > 8 {
+        if age > Self.staleLostSeconds {
             state = .lost
-        } else if age > 3 {
+        } else if age > Self.staleDegradedSeconds {
             state = .degraded
         }
         if previousState == .locked, state != .locked {
@@ -116,11 +130,20 @@ final class LocationTracker: NSObject {
         lastAccuracyMeters = location.horizontalAccuracy
         lastFixDate = location.timestamp
 
-        let previousState = state
-        let isGoodFix = location.horizontalAccuracy > 0 && location.horizontalAccuracy < 30
-        state = isGoodFix ? .locked : .degraded
-        if previousState == .locked, state != .locked {
-            degradedEpisodeCount += 1
+        let isGoodFix = location.horizontalAccuracy > 0 && location.horizontalAccuracy < Self.accuracyThresholdMeters
+        if isGoodFix {
+            // Recovery is immediate — only degradation needs sustained evidence.
+            consecutiveBadFixes = 0
+            state = .locked
+        } else {
+            let previousState = state
+            consecutiveBadFixes += 1
+            if consecutiveBadFixes >= Self.requiredConsecutiveBadFixes {
+                state = .degraded
+                if previousState == .locked {
+                    degradedEpisodeCount += 1
+                }
+            }
         }
 
         let iso = Self.isoFormatter.string(from: location.timestamp)

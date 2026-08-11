@@ -70,6 +70,8 @@ struct ContentView: View {
             ParkingReviewView(model: model)
         case .mapSegments:
             MapSegmentsView(model: model)
+        case .cloudSync:
+            CloudSyncSettingsView(model: model)
         case .reports, .surveyors, .calibration:
             ContentUnavailableView(
                 model.selection.title,

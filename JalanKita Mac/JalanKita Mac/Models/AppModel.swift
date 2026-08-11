@@ -23,6 +23,8 @@
 //  purely DummySegmentation-driven, untouched by real uploads.
 //
 
+import AppKit
+import CloudKit
 import Foundation
 import Observation
 import JalanKitaKit
@@ -59,6 +61,9 @@ final class AppModel {
     private let inferenceService = InferenceService.shared
     private let carDetectionService = CarDetectionService.shared
 
+    let cloudKitSyncEngine: CloudKitSyncEngine
+    private let syncedSessionIngestor: SyncedSessionIngestor
+
     /// The Session currently being analyzed, so worker progress events (which
     /// carry no session id of their own) update only that row's queue
     /// progress — not any of SampleData's unrelated dummy `.segmenting` rows.
@@ -79,12 +84,37 @@ final class AppModel {
     }
 
     init() {
+        cloudKitSyncEngine = CloudKitSyncEngine(appSupportDir: Self.appSupportDir())
+        syncedSessionIngestor = SyncedSessionIngestor(
+            workDir: Self.appSupportDir().appendingPathComponent("synced-sessions", isDirectory: true)
+        )
+
         inferenceService.onProgress = { [weak self] line in
             self?.applyProgress(line)
         }
         carDetectionService.onProgress = { [weak self] progress in
             self?.applyCarDetectionProgress(progress)
         }
+        syncedSessionIngestor.appModel = self
+        cloudKitSyncEngine.ingestDelegate = syncedSessionIngestor
+
+        // Launch-time sync, plus a re-sync every time the app regains
+        // focus — the closest Mac equivalent of iOS's scenePhase-based
+        // foreground trigger. Without this, nothing would fetch until the
+        // user manually opened "Sinkronisasi iCloud" and tapped the button.
+        Task { await self.syncNow() }
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { await self?.syncNow() }
+        }
+    }
+
+    /// Manual/foreground sync trigger — no push infrastructure in this
+    /// phase (see the phase plan), so this is the only way changes
+    /// actually move between the Mac and CloudKit.
+    func syncNow() async {
+        await cloudKitSyncEngine.syncNow()
     }
 
     var queuedSessions: [Session] {
@@ -290,6 +320,98 @@ final class AppModel {
                                     message: "Deteksi mobil gagal: \(error.localizedDescription)",
                                     isWarning: true), at: 0)
         }
+    }
+
+    /// Entry point for a session that arrived via CloudKit (see
+    /// `SyncedSessionIngestor`) — deliberately NOT a call into `uploadVideo`,
+    /// which synthesizes a brand-new placeholder `Session` with fabricated
+    /// fields. A synced session already carries real GPS/duration/surveyor
+    /// data from the iPhone that must be preserved, so this inserts/updates
+    /// that real `Session` instead. Multi-clip sessions run car detection
+    /// PER CLIP and merge candidate lists — concatenating clips first would
+    /// reintroduce the lossy re-encode step the iOS side's per-clip
+    /// finalization (`movieFragmentInterval`) was chosen to avoid.
+    func ingestSyncedSession(_ session: Session, clipURLs: [URL], zoneID: CKRecordZone.ID) {
+        if let index = sessions.firstIndex(where: { $0.id == session.id }) {
+            sessions[index] = session
+        } else {
+            sessions.append(session)
+        }
+        updateSessionStatus(session.id, .segmenting(progress: 0))
+        Task {
+            await runSyncedSessionAnalysis(sessionID: session.id, clipURLs: clipURLs, zoneID: zoneID)
+        }
+    }
+
+    private func runSyncedSessionAnalysis(sessionID: String, clipURLs: [URL], zoneID: CKRecordZone.ID) async {
+        var candidatePairs: [(candidate: CarCandidate, screenshotDir: URL)] = []
+        for (clipIndex, clipURL) in clipURLs.enumerated() {
+            let workDir = Self.carDetectionWorkDir(sessionID: "\(sessionID)-clip\(clipIndex)")
+            do {
+                let detection = try await carDetectionService.detect(video: clipURL, workDir: workDir)
+                candidatePairs += detection.summary.carsDetectedParked.map { ($0, detection.screenshotDir) }
+            } catch {
+                logLines.insert(LogLine(
+                    time: Self.logTimeFormatter.string(from: Date()),
+                    message: "Deteksi mobil gagal (klip \(clipIndex), sesi tersinkron): \(error.localizedDescription)",
+                    isWarning: true), at: 0)
+            }
+            updateSessionStatus(sessionID, .segmenting(progress: Double(clipIndex + 1) / Double(clipURLs.count) / 2))
+        }
+
+        guard !candidatePairs.isEmpty else {
+            updateSessionStatus(sessionID, .done)
+            parkingAnalyses[sessionID] = []
+            pushSessionStatus(sessionID: sessionID, zoneID: zoneID)
+            return
+        }
+
+        var analyses: [ParkingAnalysis] = []
+        for (index, pair) in candidatePairs.enumerated() {
+            let imagePath = pair.screenshotDir.appendingPathComponent(pair.candidate.fileClean)
+            let requestID = "\(sessionID)#\(pair.candidate.trackID)"
+            do {
+                let result = try await inferenceService.analyze(imagePath: imagePath, requestID: requestID)
+                let analysis = ParkingAnalysis(
+                    id: requestID, sessionID: sessionID, imageURL: imagePath,
+                    imageWidth: result.imageWidth, imageHeight: result.imageHeight,
+                    summary: result.summary, bevPNGPath: result.bevPNGPath, carCandidate: pair.candidate
+                )
+                analyses.append(analysis)
+                pushParkingResult(analysis, zoneID: zoneID)
+            } catch {
+                logLines.insert(LogLine(
+                    time: Self.logTimeFormatter.string(from: Date()),
+                    message: "OFRSNet gagal untuk mobil #\(pair.candidate.trackID) (sesi tersinkron): \(error.localizedDescription)",
+                    isWarning: true), at: 0)
+            }
+            updateSessionStatus(sessionID, .segmenting(progress: 0.5 + Double(index + 1) / Double(candidatePairs.count) / 2))
+        }
+
+        updateSessionStatus(sessionID, analyses.isEmpty ? .failed(reason: "Semua analisis OFRSNet gagal.") : .done)
+        parkingAnalyses[sessionID] = analyses
+        pushSessionStatus(sessionID: sessionID, zoneID: zoneID)
+    }
+
+    private func pushSessionStatus(sessionID: String, zoneID: CKRecordZone.ID) {
+        guard let session = sessions.first(where: { $0.id == sessionID }) else { return }
+        cloudKitSyncEngine.enqueueSessionUpdate(session, zoneID: zoneID)
+    }
+
+    private func pushParkingResult(_ analysis: ParkingAnalysis, zoneID: CKRecordZone.ID) {
+        guard let summaryData = try? JSONEncoder().encode(analysis.summary),
+              let summaryJSON = String(data: summaryData, encoding: .utf8) else { return }
+        let result = SyncedParkingResult(
+            sessionID: analysis.sessionID,
+            candidateID: analysis.carCandidate.map { String($0.trackID) } ?? analysis.id,
+            sourceKind: analysis.carCandidate != nil ? "videoCandidate" : "manual",
+            carTrackID: analysis.carCandidate?.trackID,
+            imageWidth: analysis.imageWidth,
+            imageHeight: analysis.imageHeight,
+            summaryJSON: summaryJSON
+        )
+        let bevURL = analysis.bevPNGPath.map { URL(fileURLWithPath: $0) }
+        cloudKitSyncEngine.enqueueParkingResult(result, zoneID: zoneID, imageFileURL: analysis.imageURL, bevFileURL: bevURL)
     }
 
     /// Called when the user taps a different vehicle overlay in Tinjauan

@@ -55,7 +55,7 @@ struct SidebarView: View {
         case .videoDetection: model.isVideoProcessing ? 1 : 0
         case .parkingReview: model.parkingReviewSessions.count
         case .surveyors: model.surveyorCount
-        case .mapSegments, .reports, .calibration: 0
+        case .mapSegments, .reports, .calibration, .cloudSync: 0
         }
     }
 }

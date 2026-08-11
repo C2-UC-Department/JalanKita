@@ -239,12 +239,31 @@ struct ActiveRecordingView: View {
                 gpsHz: location.pointCount > 0 && elapsed > 0 ? Double(location.pointCount) / elapsed : nil,
                 gpsGapNote: location.gpsGapNote,
                 sizeGB: sessionSizeGB(),
-                status: location.gpsGapNote == nil ? .readyToProcess : .degraded(reason: location.gpsGapNote ?? "")
+                status: location.gpsGapNote == nil ? .readyToProcess : .degraded(reason: location.gpsGapNote ?? ""),
+                recordedDate: startedAt,
+                durationSeconds: elapsed
             )
-            model.recordingFinished(session)
+            model.recordingFinished(session, gpsSummary: gpsSummary())
             print("[ActiveRecordingView] dismissing \(Int(Date().timeIntervalSince(tappedAt) * 1000)) ms after tap")
             dismiss()
         }
+    }
+
+    /// Bounding box + point count off the in-memory track — computed once
+    /// here, while `location` is still in scope, rather than re-parsing
+    /// `gps.csv` later every time the sync engine needs it.
+    private func gpsSummary() -> SyncedGPSTrack {
+        let coordinates = location.trackCoordinates
+        let latitudes = coordinates.map(\.latitude)
+        let longitudes = coordinates.map(\.longitude)
+        return SyncedGPSTrack(
+            sessionID: sessionID,
+            pointCount: location.pointCount,
+            minLatitude: latitudes.min() ?? 0,
+            minLongitude: longitudes.min() ?? 0,
+            maxLatitude: latitudes.max() ?? 0,
+            maxLongitude: longitudes.max() ?? 0
+        )
     }
 
     private func formattedDuration(_ seconds: TimeInterval) -> String {

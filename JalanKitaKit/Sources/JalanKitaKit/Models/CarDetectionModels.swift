@@ -15,7 +15,7 @@ import CoreGraphics
 
 /// One car v13 classified as PARKED (its own STOP_CLASS bucket, including the
 /// depth-tiebreak variant) -- a candidate photo for OFRSNet to score.
-public struct CarCandidate: Decodable, Identifiable, Sendable {
+public struct CarCandidate: Codable, Identifiable, Sendable {
     public let trackID: Int
     public let stopClass: String
     public let disturbance: Bool

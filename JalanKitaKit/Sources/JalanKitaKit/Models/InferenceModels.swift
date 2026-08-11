@@ -146,8 +146,11 @@ public struct WorkerEvent: Decodable, Sendable {
     public let error: String?
 }
 
-/// Mirrors `DisturbanceResult.summary()` (src/disturbance.py).
-public struct DisturbanceSummary: Decodable, Sendable {
+/// Mirrors `DisturbanceResult.summary()` (src/disturbance.py). `Encodable`
+/// (not just `Decodable`) because the Mac re-encodes this into
+/// `SyncedParkingResult.summaryJSON` to push a real result back to the
+/// iPhone via CloudKit.
+public struct DisturbanceSummary: Codable, Sendable {
     public let image: String
     public let ok: Bool
     public let scale: ScaleInfo
@@ -158,7 +161,7 @@ public struct DisturbanceSummary: Decodable, Sendable {
     public let warnings: [String]
 }
 
-public struct ScaleInfo: Decodable, Sendable {
+public struct ScaleInfo: Codable, Sendable {
     public let mode: String
     public let cameraHeightM: Double?
     public let impliedCameraHeightM: Double?
@@ -177,7 +180,7 @@ public struct ScaleInfo: Decodable, Sendable {
     }
 }
 
-public struct ResolutionInfo: Decodable, Sendable {
+public struct ResolutionInfo: Codable, Sendable {
     public let measurableRangeM: Double
     public let maxM2PerPx: Double
     public let inFramePct: Double
@@ -191,7 +194,7 @@ public struct ResolutionInfo: Decodable, Sendable {
     }
 }
 
-public struct TotalSummary: Decodable, Sendable {
+public struct TotalSummary: Codable, Sendable {
     public let amodalRoadM2: Double
     public let visibleRoadM2: Double
     public let occludedRoadM2: Double
@@ -209,7 +212,7 @@ public struct TotalSummary: Decodable, Sendable {
     }
 }
 
-public struct AreaMeasure: Decodable, Sendable {
+public struct AreaMeasure: Codable, Sendable {
     public let areaM2: Double
     public let areaM2Raw: Double
     public let cells: Int
@@ -227,7 +230,7 @@ public struct AreaMeasure: Decodable, Sendable {
 /// case where `analyze()` returned before BEV attribution ran at all
 /// (`summary.ok == false`) — a vehicle with zero attributed area still gets
 /// a real `0.0`, not nil.
-public struct VehicleSummary: Decodable, Sendable {
+public struct VehicleSummary: Codable, Sendable {
     public let id: Int
     public let label: String
     public let score: Double?
