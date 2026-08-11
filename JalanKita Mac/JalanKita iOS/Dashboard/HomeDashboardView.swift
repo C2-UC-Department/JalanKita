@@ -15,6 +15,7 @@ struct HomeDashboardView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.scenePhase) private var scenePhase
     @State private var isRecording = false
+    @State private var isPresentingSyncSetup = false
 
     var body: some View {
         NavigationStack {
@@ -57,6 +58,13 @@ struct HomeDashboardView: View {
             }
             .navigationTitle("JalanKita")
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        isPresentingSyncSetup = true
+                    } label: {
+                        Label("Bagikan ke Mac", systemImage: "person.badge.plus")
+                    }
+                }
                 ToolbarItem(placement: .primaryAction) {
                     Button {
                         Task { await model.syncNow() }
@@ -72,6 +80,9 @@ struct HomeDashboardView: View {
             }
             .fullScreenCover(isPresented: $isRecording) {
                 ActiveRecordingView()
+            }
+            .sheet(isPresented: $isPresentingSyncSetup) {
+                SyncSetupView()
             }
             .onChange(of: scenePhase) { _, newPhase in
                 guard newPhase == .active else { return }

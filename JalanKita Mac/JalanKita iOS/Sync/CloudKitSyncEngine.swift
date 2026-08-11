@@ -251,6 +251,38 @@ final class CloudKitSyncEngine {
         }
     }
 
+    // MARK: - CKShare (invite the Mac desk operator)
+
+    /// The container `UICloudSharingController` needs alongside a share.
+    var containerForSharing: CKContainer {
+        CKContainer(identifier: CloudKitSchema.containerIdentifier)
+    }
+
+    /// Fetches this surveyor's existing zone-wide share, creating one if
+    /// it doesn't exist yet. Because the share is zone-wide (not
+    /// per-record), every Session/Clip/GPSTrack/CalibrationProfile record
+    /// created in this zone — past or future — is automatically covered
+    /// once accepted; the surveyor never re-invites for a new session.
+    func fetchOrCreateShare() async throws -> CKShare {
+        try await ensureZoneProvisioned()
+
+        let shareRecordID = CKRecord.ID(recordName: CKRecordNameZoneWideShare, zoneID: zoneID)
+        if let fetchResults = try? await database.records(for: [shareRecordID]),
+           case .success(let record) = fetchResults[shareRecordID],
+           let existingShare = record as? CKShare {
+            return existingShare
+        }
+
+        let share = CKShare(recordZoneID: zoneID)
+        // Anyone with the link can join as a read/write participant — this
+        // app has no contacts/participant-lookup UI, so "copy the link,
+        // send it any way you like" is the right fit for v1.
+        share.publicPermission = .readWrite
+        share[CKShare.SystemFieldKey.title] = "Sesi survei JalanKita" as CKRecordValue
+        _ = try await database.modifyRecords(saving: [share], deleting: [], savePolicy: .changedKeys, atomically: true)
+        return share
+    }
+
     // MARK: - Change token persistence
 
     private static func loadChangeToken(from url: URL) -> CKServerChangeToken? {
