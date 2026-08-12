@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Entitlements for the two PyInstaller-frozen helper executables
+	     (disturbance-worker, pipeline_v13), NOT the main app -- see
+	     sign_workers.sh. All four are standard, well-documented
+	     requirements for a PyInstaller/PyTorch bundle under the hardened
+	     runtime; without them the worker aborts on launch once actually
+	     signed (rather than ad-hoc) and notarized. -->
+
+	<!-- PyTorch JIT-compiles kernels at runtime (TorchScript / fused ops). -->
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+
+	<!-- Hardened runtime's library validation requires every loaded dylib
+	     to be signed by the same Team ID as the host binary. A PyInstaller
+	     onedir output for this dependency stack bundles hundreds of
+	     third-party dylibs (torch, opencv, ...) we sign ad-hoc/ourselves,
+	     not with Apple's own per-team chain -- library validation would
+	     reject nearly all of them without this. -->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+
+	<!-- PyInstaller's bootloader uses DYLD_LIBRARY_PATH internally to find
+	     the onedir bundle's _internal/ directory at launch. -->
+	<key>com.apple.security.cs.allow-dyld-environment-variables</key>
+	<true/>
+</dict>
+</plist>

@@ -19,6 +19,7 @@
 
 import SwiftUI
 import MapKit
+import JalanKitaKit
 
 private enum MapLayer: String, CaseIterable, Identifiable {
     case coverage = "Cakupan"

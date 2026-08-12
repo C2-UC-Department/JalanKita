@@ -12,6 +12,7 @@
 //
 
 import Foundation
+import JalanKitaKit
 
 /// Everything one `analyze()` call produces, beyond the raw
 /// `DisturbanceSummary` — the image's own pixel dimensions (needed to

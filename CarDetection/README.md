@@ -22,7 +22,9 @@ lib/                          v5/v6/v8 signal code + v10 sign/coverage-zone code
 depth/                        Depth-rate measurement (MiDaS backend + calibration).
 models/signs_crosswalk_v10_hardneg_r3_best.pt   Our own trained sign/crosswalk detector weights.
 yolov8n-seg.pt                 Stock Ultralytics vehicle detector/segmenter weights.
-requirements.txt               Inference-only dependencies.
+requirements.txt               Inference-only dependencies (+ pyinstaller, for build_worker.sh).
+car_detection_worker.spec      PyInstaller spec for the onedir build.
+build_worker.sh                Builds dist/pipeline_v13/ from a clean venv.
 ```
 
 Two more models download and cache themselves on first run via `torch.hub` (`~/.cache/torch/hub`,
@@ -70,13 +72,38 @@ are transitive dependencies of `torch.hub`-loaded repos (YOLOP needs `prefetch_g
 mechanism: a teammate's first run shouldn't depend on an internet-connected surprise pip install
 mutating their venv mid-run.
 
-## No PyInstaller build yet
+## Building the frozen worker (`pipeline_v13`)
 
-Unlike `disturbance-worker`, there is no frozen build of this pipeline — `CarDetectionService`
-only resolves a dev-mode launch (`.venv/bin/python3 pipeline_v13.py`). A distributed/archived build
-of JalanKita Mac does not currently include car-detection-from-video at all; it needs a dev
-Python environment present, same constraint the "Building the frozen worker" section of
-`PythonWorker/README.md` describes solving for the disturbance pipeline, not yet done here.
+Needed once before archiving a build meant to run without a dev Python environment present — a
+normal Xcode Run/Debug does **not** require this, it uses the dev venv above instead.
+
+```
+./build_worker.sh
+```
+
+Produces `dist/pipeline_v13/` (the executable + an `_internal/` folder with everything it needs —
+torch, torchvision, ultralytics, opencv, and their data files, plus `yacs`/`prefetch_generator`/`lap`
+explicitly `collect_all`'d in `car_detection_worker.spec` even though nothing in this folder's own
+`.py` files imports them directly — they're real transitive dependencies of code `torch.hub`
+downloads and executes at runtime (YOLOP, ByteTrack), invisible to PyInstaller's static analysis).
+Unlike `disturbance_worker.spec`, no wrapper entry-point script was needed: `pipeline_v13.py` is
+already invoked as a plain script (`python3 pipeline_v13.py --input ...`), which PyInstaller can
+target directly.
+
+`pipeline_v13.py`'s own `SCRIPT_DIR` (used to find the bundled `yolov8n-seg.pt` and
+`models/signs_crosswalk_v10_hardneg_r3_best.pt`) resolves via `sys._MEIPASS` when frozen — the
+same fix `PythonWorker/worker_main.py` needed for its checkpoint, now inlined directly into
+`pipeline_v13.py` itself since it's already the PyInstaller entry point.
+
+The two `torch.hub`-downloaded models (YOLOP, MiDaS_small) are **not** bundled — they still
+download and cache themselves on first run exactly as in dev mode (this was verified: the frozen
+executable, run standalone with a stripped environment, found and reused the same
+`~/.cache/torch/hub` a prior dev-mode run had already populated).
+
+The Xcode project's "Stage pipeline_v13" run-script build phase copies `dist/pipeline_v13/` into
+`Contents/Resources/pipeline_v13/` automatically if present, and no-ops (with a warning, not a
+failure) if you haven't built it — so UI-only development never needs a Python toolchain at all.
+`CarDetectionService.resolveLaunch()` checks that packaged path first, before either dev tier.
 
 ## Keeping this in sync with the v13 dev workspace
 

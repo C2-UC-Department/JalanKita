@@ -59,6 +59,7 @@
 
 import SwiftUI
 import UniformTypeIdentifiers
+import JalanKitaKit
 
 struct ReviewFindingsView: View {
     var model: AppModel

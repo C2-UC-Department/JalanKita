@@ -8,6 +8,7 @@
 //
 
 import SwiftUI
+import JalanKitaKit
 
 struct MapLegendView: View {
     private let worstBySeverity: [Severity: Int] = [.urgent: 16, .monitor: 43, .ignore: 177]

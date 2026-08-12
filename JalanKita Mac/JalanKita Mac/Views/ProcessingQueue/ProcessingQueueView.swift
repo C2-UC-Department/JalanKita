@@ -7,37 +7,24 @@
 //  rows — selection, hover, and keyboard up/down navigation all come from
 //  the framework instead of being reimplemented with @State.
 //
-//  "Unggah foto…" is the entry point for the real parking-disturbance
-//  pipeline (AppModel.uploadImage). The picked file is copied into the
-//  app's own sandbox container (FileManager.temporaryDirectory) before being
-//  handed to AppModel/InferenceService: the security-scoped access
-//  `.fileImporter` grants is only valid for reads made by this (sandboxed)
-//  process, not for the separate disturbance-worker subprocess that will
-//  eventually open the path — staging a plain copy sidesteps that instead
-//  of trying to extend sandbox access to a child process.
-//
-//  Video upload (v13 car-detection) lives on its own screen now --
-//  Views/VideoDetection/VideoDetectionView.swift -- not here. An earlier
-//  version added a second "Unggah video…" toolbar button + fileImporter to
-//  THIS screen; the project owner asked for a dedicated section instead, so
-//  that upload action and result together read as one self-contained flow
-//  rather than split across this queue and Tinjauan Parkir.
+//  Pure queue/progress viewer, no upload entry point of its own — both
+//  "Unggah foto…" and "Unggah video…" live in Session Inbox's toolbar,
+//  since that's where sessions actually live; a session created by either
+//  upload shows up here automatically once its status flips to `.segmenting`.
 //
 
 import SwiftUI
-import UniformTypeIdentifiers
+import JalanKitaKit
 
 struct ProcessingQueueView: View {
     var model: AppModel
 
     @State private var selection: Session.ID?
-    @State private var showingImporter = false
-    @State private var importError: String?
 
     private var queue: [Session] { model.queuedSessions }
 
     private var active: Session? {
-        queue.first { $0.id == selection } ?? queue.first
+        queue.first { $0.id == selection } ?? queue.first(where: isRunning) ?? queue.first
     }
 
     var body: some View {
@@ -62,59 +49,28 @@ struct ProcessingQueueView: View {
         .navigationTitle("Antrean pemrosesan")
         .navigationSubtitle("\(queue.filter(isRunning).count) berjalan · \(queue.count - queue.filter(isRunning).count) menunggu")
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    showingImporter = true
-                } label: {
-                    Label("Unggah foto…", systemImage: "photo.badge.plus")
-                }
-            }
             ToolbarItem { Button("Jeda antrean") {} }
             ToolbarItem { Button("Log lengkap") {} }
         }
-        .fileImporter(isPresented: $showingImporter, allowedContentTypes: [.image]) { result in
-            handleImport(result)
-        }
-        .alert("Unggah gagal", isPresented: .constant(importError != nil), presenting: importError) { _ in
-            Button("OK") { importError = nil }
-        } message: { message in
-            Text(message)
-        }
         .onAppear {
-            if selection == nil { selection = queue.first?.id }
+            selectDefaultIfNeeded()
+        }
+        .onChange(of: model.sessions) { _, _ in
+            selectDefaultIfNeeded()
         }
     }
 
-    private func handleImport(_ result: Result<URL, Error>) {
-        switch result {
-        case .failure(let error):
-            importError = error.localizedDescription
-        case .success(let pickedURL):
-            guard pickedURL.startAccessingSecurityScopedResource() else {
-                importError = "Tidak bisa mengakses berkas yang dipilih."
-                return
-            }
-            defer { pickedURL.stopAccessingSecurityScopedResource() }
-            do {
-                let staged = try Self.stageForWorker(pickedURL)
-                model.uploadImage(url: staged)
-            } catch {
-                importError = error.localizedDescription
-            }
-        }
-    }
-
-    /// Copies the picked photo into `FileManager.temporaryDirectory` (inside
-    /// the app's own sandbox container) so `InferenceService`'s subprocess
-    /// worker can open it by a plain path — see the type-level doc comment.
-    private static func stageForWorker(_ sourceURL: URL) throws -> URL {
-        let stagingDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("uploads", isDirectory: true)
-        try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
-        let ext = sourceURL.pathExtension.isEmpty ? "jpg" : sourceURL.pathExtension
-        let destination = stagingDir.appendingPathComponent(UUID().uuidString).appendingPathExtension(ext)
-        try FileManager.default.copyItem(at: sourceURL, to: destination)
-        return destination
+    /// Prefers whichever session is actively `.segmenting` over just
+    /// "first in the queue" — with synced sessions now waiting at
+    /// `.readyToProcess` for a manual "Proses" click (instead of
+    /// auto-starting), the queue can easily hold several sessions at once,
+    /// and a reviewer landing here after starting one wants to see IT, not
+    /// whichever one happens to sort first. Only touches the selection when
+    /// it's missing or no longer in the queue (finished/removed) — never
+    /// yanks the view away from a session someone deliberately clicked on.
+    private func selectDefaultIfNeeded() {
+        guard selection == nil || !queue.contains(where: { $0.id == selection }) else { return }
+        selection = queue.first(where: isRunning)?.id ?? queue.first?.id
     }
 
     private func isRunning(_ session: Session) -> Bool {
@@ -124,10 +80,9 @@ struct ProcessingQueueView: View {
 
     private var todaySummary: some View {
         VStack(alignment: .leading, spacing: 8) {
-            SectionLabel(text: "HARI INI")
-            todayStat("Sesi selesai", "4")
-            todayStat("Frame dinilai", "958")
-            todayStat("Waktu komputasi", "3 j 12 m")
+            SectionLabel(text: "RINGKASAN")
+            todayStat("Sesi selesai", "\(model.doneSessionsCount)")
+            todayStat("Kendaraan diproses", "\(model.totalVehiclesAnalyzed)")
         }
         .padding(12)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
@@ -154,22 +109,30 @@ struct ProcessingQueueView: View {
 
                 HStack(spacing: 24) {
                     progressStat("KEMAJUAN", progressText(for: session), color: .accentColor)
-                    progressStat("SISA", "38 mnt", color: .primary)
-                    progressStat("LAJU", "1,04 f/d", color: .primary)
                     Spacer()
                 }
 
-                VStack(spacing: 10) {
-                    ForEach(model.pipelineSteps) { step in
-                        PipelineStepRow(step: step)
+                if steps(for: session).isEmpty {
+                    Text("Belum diproses — pilih sesi ini lalu klik \"Proses\".")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                } else {
+                    VStack(spacing: 10) {
+                        ForEach(steps(for: session)) { step in
+                            PipelineStepRow(step: step)
+                        }
                     }
                 }
 
-                LogConsoleView(lines: model.logLines)
+                LogConsoleView(lines: model.logLines[session.id] ?? [])
                     .frame(height: 190)
             }
             .padding(24)
         }
+    }
+
+    private func steps(for session: Session) -> [PipelineStep] {
+        model.pipelineSteps[session.id] ?? []
     }
 
     private func progressStat(_ title: String, _ value: String, color: Color) -> some View {

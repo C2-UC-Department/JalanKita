@@ -22,6 +22,7 @@
 //
 
 import SwiftUI
+import JalanKitaKit
 
 /// Process-wide decoded-frame cache, bounded by count.
 ///

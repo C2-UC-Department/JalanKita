@@ -29,7 +29,15 @@ import os
 import sys
 from collections import defaultdict, deque
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+# Onedir PyInstaller builds place bundled `datas` under sys._MEIPASS (the
+# `_internal/` folder next to the executable), not next to a frozen module's
+# own `__file__` -- without this, DEFAULT_MODEL/DEFAULT_CUSTOM_MODEL below
+# would point inside the read-only .app bundle at a path that doesn't exist,
+# the same class of bug worker_main.py's BASE_DIR fixes for the disturbance
+# worker. Unfrozen, this is unchanged (this script's own directory), and the
+# sys.path inserts below are harmless once frozen -- PyInstaller's own
+# importer already resolves lib/depth's modules by name at that point.
+SCRIPT_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(SCRIPT_DIR, "lib"))
 sys.path.insert(0, os.path.join(SCRIPT_DIR, "depth"))
 
@@ -411,9 +419,15 @@ def main():
                         if mb.sum() >= MIN_CAR_MASK_PX:
                             ds = cv2.resize(mb.astype(np.uint8), (depth.shape[1], depth.shape[0]),
                                             interpolation=cv2.INTER_NEAREST) > 0
-                            if ds.sum() >= 20:
-                                track_depth[int(tid)].append((frame_idx, float(np.median(depth[ds]))))
-                            track_boxes[int(tid)].append((int(x1), int(y1), int(x2), int(y2)))
+                            # ByteTrack can leave a detection untracked in a given frame
+                            # (boxes.id is None for it -> tid is None here, see ids_all
+                            # above) -- nothing to key track_depth/track_boxes by then,
+                            # but roi_occupancy is a per-pixel scene heatmap, not
+                            # track-keyed, so it still accumulates regardless.
+                            if tid is not None:
+                                if ds.sum() >= 20:
+                                    track_depth[int(tid)].append((frame_idx, float(np.median(depth[ds]))))
+                                track_boxes[int(tid)].append((int(x1), int(y1), int(x2), int(y2)))
                             roi_occupancy[mb] += 1.0
                     continue
                 box_w, box_h = x2 - x1, y2 - y1

@@ -22,6 +22,7 @@
 //
 
 import SwiftUI
+import JalanKitaKit
 
 struct FilmstripView: View {
     var model: AppModel

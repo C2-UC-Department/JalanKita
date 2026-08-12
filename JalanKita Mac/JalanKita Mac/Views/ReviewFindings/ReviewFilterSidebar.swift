@@ -11,6 +11,7 @@
 //
 
 import SwiftUI
+import JalanKitaKit
 
 private enum ReviewStatusFilter: String, CaseIterable, Identifiable {
     case unseen = "Belum dilihat"

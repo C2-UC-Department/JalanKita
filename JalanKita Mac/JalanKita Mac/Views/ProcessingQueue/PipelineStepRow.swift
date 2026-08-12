@@ -9,6 +9,7 @@
 //
 
 import SwiftUI
+import JalanKitaKit
 
 struct PipelineStepRow: View {
     let step: PipelineStep

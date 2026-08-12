@@ -30,6 +30,7 @@
 //
 
 import Foundation
+import JalanKitaKit
 
 enum CarDetectionError: Error, LocalizedError {
     case workerNotFound(detail: String)
@@ -62,12 +63,17 @@ struct CarDetectionProgress {
 
 actor CarDetectionWorkerProcess {
     private let executableURL: URL
-    private let scriptURL: URL
+    private let baseArguments: [String]
     private let workingDirectory: URL?
 
-    init(executableURL: URL, scriptURL: URL, workingDirectory: URL? = nil) {
+    /// `baseArguments` is `[scriptURL.path]` for a dev-mode launch (`python3
+    /// pipeline_v13.py ...`) or `[]` for the packaged, frozen executable
+    /// (`pipeline_v13 ...` directly) -- mirrors InferenceWorkerProcess's own
+    /// plain `arguments` parameter rather than treating "script path" as a
+    /// concept this type needs to know about.
+    init(executableURL: URL, baseArguments: [String] = [], workingDirectory: URL? = nil) {
         self.executableURL = executableURL
-        self.scriptURL = scriptURL
+        self.baseArguments = baseArguments
         self.workingDirectory = workingDirectory
     }
 
@@ -79,22 +85,14 @@ actor CarDetectionWorkerProcess {
     /// summary with an empty `carsDetectedParked`, not an error.
     func run(video: URL, screenshotDir: URL, outputVideoPath: URL,
             onProgress: @Sendable @escaping (CarDetectionProgress) -> Void) async throws -> CarDetectionSummary {
-        guard FileManager.default.isExecutableFile(atPath: executableURL.path),
-              FileManager.default.fileExists(atPath: scriptURL.path) else {
-            throw CarDetectionError.workerNotFound(detail: "python=\(executableURL.path) script=\(scriptURL.path)")
+        guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
+            throw CarDetectionError.workerNotFound(detail: "executable=\(executableURL.path)")
         }
         try FileManager.default.createDirectory(at: screenshotDir, withIntermediateDirectories: true)
 
         let process = Process()
         process.executableURL = executableURL
-        // Dev mode: executableURL is python3, scriptURL is pipeline_v13.py --
-        // `python3 pipeline_v13.py --input ...` needs the script path as the
-        // first argument. Packaged mode: executableURL == scriptURL (the
-        // frozen binary IS the interpreter, see CarDetectionService's
-        // resolveLaunch) -- passing its own path as an extra positional arg
-        // would break its argparse, which expects `--input` first.
-        let scriptArg = executableURL == scriptURL ? [] : [scriptURL.path]
-        process.arguments = scriptArg + [
+        process.arguments = baseArguments + [
             "--input", video.path,
             "--output", outputVideoPath.path,
             "--screenshot-dir", screenshotDir.path,

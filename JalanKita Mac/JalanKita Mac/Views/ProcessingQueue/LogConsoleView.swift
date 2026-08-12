@@ -4,6 +4,7 @@
 //
 
 import SwiftUI
+import JalanKitaKit
 
 struct LogConsoleView: View {
     let lines: [LogLine]

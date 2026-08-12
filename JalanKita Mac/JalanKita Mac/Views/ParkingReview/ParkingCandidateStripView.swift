@@ -2,8 +2,8 @@
 //  ParkingCandidateStripView.swift
 //  JalanKita Mac
 //
-//  Second pane of Tinjauan Parkir, between the session list and the canvas —
-//  only meaningful once a session can hold several ParkingAnalyses (v13's
+//  Candidate list under Tinjauan Parkir's video player/timeline — only
+//  meaningful once a session can hold several ParkingAnalyses (v13's
 //  uploadVideo, one per PARKED car it found). A manual photo upload still
 //  produces exactly one, so this pane is a single unselectable-looking row
 //  in that case rather than an extra click most users of that path will
@@ -12,17 +12,25 @@
 //
 
 import SwiftUI
+import JalanKitaKit
 
 struct ParkingCandidateStripView: View {
     let analyses: [ParkingAnalysis]
     @Binding var selectedAnalysisID: ParkingAnalysis.ID?
 
+    /// Chronological, not upload order — the whole point of surfacing a
+    /// timestamp per candidate is to make "which timestamps have a
+    /// detection" easy to scan top to bottom, not just left to right on the
+    /// timeline above.
+    private var sortedAnalyses: [ParkingAnalysis] {
+        analyses.sorted { ($0.sessionRelativeSeconds ?? .infinity) < ($1.sessionRelativeSeconds ?? .infinity) }
+    }
+
     var body: some View {
-        List(analyses, selection: $selectedAnalysisID) { analysis in
+        List(sortedAnalyses, selection: $selectedAnalysisID) { analysis in
             CandidateRow(analysis: analysis)
         }
         .listStyle(.sidebar)
-        .frame(minWidth: 220, idealWidth: 250, maxWidth: 280)
     }
 }
 
@@ -57,7 +65,10 @@ private struct CandidateRow: View {
     }
 
     private var secondaryLine: String {
-        var parts = ["\(analysis.rankedVehicles.count) kendaraan terukur"]
+        var parts: [String] = []
+        if let seconds = analysis.sessionRelativeSeconds {
+            parts.append(ParkingTimelineView.formattedTimestamp(seconds))
+        }
         if let candidate = analysis.carCandidate {
             parts.append(candidate.stopClass)
             parts.append("depth: \(candidate.depthReading)")

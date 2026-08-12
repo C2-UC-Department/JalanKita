@@ -6,20 +6,20 @@
 //  InferenceService's role for the disturbance worker. @MainActor for the
 //  same reason: it's called from AppModel and forwards progress back to it.
 //
-//  Path resolution mirrors InferenceService.resolveWorkerLaunch(): v13 lives
-//  at `CarDetection/` -- a sibling of `PythonWorker/` INSIDE this repo, a
+//  Path resolution mirrors InferenceService.resolveWorkerLaunch()'s 3 tiers
+//  exactly (packaged -> dev explicit -> dev zero-config). v13 lives at
+//  `CarDetection/` -- a sibling of `PythonWorker/` INSIDE this repo, a
 //  trimmed self-contained copy (same reasoning as PythonWorker/README's own
 //  "kept here so contributors can build and run the app without a second
 //  repo checkout"), not an external sibling folder that a `git clone` would
-//  never bring along. It needs its OWN `.venv` -- ultralytics/YOLO/MiDaS/
-//  YOLOP is a completely different, heavier dependency stack than
+//  never bring along. Its dev tier needs its OWN `.venv` -- ultralytics/YOLO/
+//  MiDaS/YOLOP is a completely different, heavier dependency stack than
 //  PythonWorker's Mask2Former/OFRSNet one (see CarDetection/requirements.txt)
-//  -- so it cannot reuse PythonWorker/.venv. There is no PyInstaller-frozen
-//  build of v13 yet (unlike disturbance-worker) -- this only resolves a
-//  dev-mode launch, same as PythonWorker's own dev-tier resolution.
+//  -- so it cannot reuse PythonWorker/.venv.
 //
 
 import Foundation
+import JalanKitaKit
 
 struct CarDetectionResult {
     let summary: CarDetectionSummary
@@ -40,8 +40,9 @@ final class CarDetectionService {
     /// keyed by session id so re-running never collides with another
     /// session's output).
     func detect(video: URL, workDir: URL) async throws -> CarDetectionResult {
-        let (python, script, cwd) = try Self.resolveLaunch()
-        let worker = CarDetectionWorkerProcess(executableURL: python, scriptURL: script, workingDirectory: cwd)
+        let (executable, baseArguments, cwd) = try Self.resolveLaunch()
+        let worker = CarDetectionWorkerProcess(executableURL: executable, baseArguments: baseArguments,
+                                               workingDirectory: cwd)
         let screenshotDir = workDir
         let outputVideoPath = workDir.appendingPathComponent("annotated.mp4")
         let forward = onProgress
@@ -58,7 +59,9 @@ final class CarDetectionService {
     ///     CarDetection" run-script build phase (see
     ///     JalanKita Mac.xcodeproj, and `CarDetection/build_cardetection.sh`).
     ///     This is how the shipped app runs car detection without a dev
-    ///     Python environment present.
+    ///     Python environment present. Invoked directly with no leading
+    ///     script argument -- the frozen executable takes the same
+    ///     `--input`/`--output`/`--screenshot-dir` flags pipeline_v13.py does.
     ///  2. **Dev, explicit**: `JALANKITA_V13_REPO` + `JALANKITA_V13_PYTHON`
     ///     env vars, for anyone whose checkout doesn't match the layout
     ///     below (e.g. a separate full v13 dev checkout with more than the
@@ -72,16 +75,11 @@ final class CarDetectionService {
     ///     requirements.txt`, same recipe as PythonWorker/README's dev
     ///     setup. Both env vars override independently so only the
     ///     mismatched half needs setting.
-    ///
-    /// The packaged tier runs a different script (`cardetection_main.py`,
-    /// not `pipeline_v13.py` directly) with no `.venv` -- the frozen
-    /// executable IS the interpreter, so `python`/`script` collapse to the
-    /// same value there; see CarDetectionWorkerProcess for how that's used.
-    private static func resolveLaunch() throws -> (python: URL, script: URL, cwd: URL?) {
+    private static func resolveLaunch() throws -> (executable: URL, baseArguments: [String], cwd: URL?) {
         if let bundled = Bundle.main.resourceURL?
             .appendingPathComponent("car-detection/cardetection"),
            FileManager.default.isExecutableFile(atPath: bundled.path) {
-            return (bundled, bundled, nil)
+            return (bundled, [], nil)
         }
 
         let env = ProcessInfo.processInfo.environment
@@ -98,7 +96,7 @@ final class CarDetectionService {
                 "repoRoot=\(repoRoot.path)\nscript=\(script.path) (exists=\(scriptExists))\n"
                 + "python=\(python.path) (executable=\(pythonExecutable))")
         }
-        return (python, script, repoRoot)
+        return (python, [script.path], repoRoot)
     }
 
     /// `CarDetection/`, five path components up from this source file (same

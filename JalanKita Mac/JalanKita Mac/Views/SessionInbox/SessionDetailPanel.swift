@@ -11,9 +11,26 @@
 
 import SwiftUI
 import MapKit
+import JalanKitaKit
 
 struct SessionDetailPanel: View {
     let session: Session
+    var model: AppModel
+
+    @State private var coordinates: [CLLocationCoordinate2D] = []
+
+    private var hasParkingResults: Bool {
+        !(model.parkingAnalyses[session.id]?.isEmpty ?? true)
+    }
+
+    /// Only a real synced session has a GPS track to show — a manual
+    /// upload (`uploadImage`/`uploadVideo`) has none.
+    private var isSyncedSession: Bool { session.recordedDate != nil }
+
+    private var isReadyToProcess: Bool {
+        if case .readyToProcess = session.status { return true }
+        return false
+    }
 
     var body: some View {
         ScrollView {
@@ -28,73 +45,47 @@ struct SessionDetailPanel: View {
                         .foregroundStyle(.secondary)
                 }
 
-                SessionRouteMap(coordinates: RouteSampleCoordinates.route(for: session.id))
-                    .frame(height: 190)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color(nsColor: .separatorColor)))
-                    .overlay(alignment: .topLeading) {
-                        Text("JEJAK GPS · 6.412 TITIK")
-                            .font(.caption2.weight(.bold))
-                            .tracking(0.5)
-                            .padding(6)
-                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
-                            .padding(8)
-                    }
-
-                Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 16) {
-                    GridRow {
-                        miniStat("FRAME @ 1 FPS", "6.442")
-                        miniStat("SETELAH SARINGAN", "5.918")
-                    }
-                    GridRow {
-                        miniStat("KALIBRASI DUDUKAN", "Dudukan A · 3,00 m")
-                        miniStat("SEGMEN 10 M", "± 2.460")
-                    }
-                }
-
-                VStack(alignment: .leading, spacing: 10) {
-                    SectionLabel(text: "PIPELINE YANG AKAN DIJALANKAN")
-                    VStack(alignment: .leading, spacing: 8) {
-                        pipelinePreviewRow(1, "Ekstraksi frame · 1 fps")
-                        pipelinePreviewRow(2, "Penggabungan jejak GPS")
-                        pipelinePreviewRow(3, "Segmentasi kerusakan jalan")
-                        pipelinePreviewRow(4, "Deteksi parkir mengganggu")
-                        pipelinePreviewRow(5, "Penilaian keparahan & binning")
-                    }
+                if isSyncedSession {
+                    SessionRouteMap(coordinates: coordinates)
+                        .frame(height: 190)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color(nsColor: .separatorColor)))
+                        .overlay(alignment: .topLeading) {
+                            if !coordinates.isEmpty {
+                                Text("JEJAK GPS · \(coordinates.count) TITIK")
+                                    .font(.caption2.weight(.bold))
+                                    .tracking(0.5)
+                                    .padding(6)
+                                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+                                    .padding(8)
+                            }
+                        }
+                        .task(id: session.id) {
+                            coordinates = SessionGPSTrackLoader.loadCoordinates(sessionID: session.id)
+                        }
                 }
 
                 Spacer(minLength: 12)
 
                 HStack(spacing: 10) {
-                    Button("Proses sekarang") {}
+                    if isSyncedSession, isReadyToProcess {
+                        Button("Proses sekarang") {
+                            model.startProcessing(sessionID: session.id)
+                        }
                         .buttonStyle(.borderedProminent)
                         .frame(maxWidth: .infinity)
+                    }
 
-                    Button("Buka video") {}
-                        .buttonStyle(.bordered)
-                        .frame(maxWidth: .infinity)
+                    NavigationLink(value: session) {
+                        Text("Buka video")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(!hasParkingResults)
                 }
                 .controlSize(.large)
             }
             .padding(24)
-        }
-    }
-
-    private func miniStat(_ title: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title).font(.caption2.weight(.semibold)).foregroundStyle(.secondary).tracking(0.4)
-            Text(value).font(.data(14, weight: .semibold))
-        }
-    }
-
-    private func pipelinePreviewRow(_ number: Int, _ text: String) -> some View {
-        HStack(spacing: 10) {
-            Text("\(number)")
-                .font(.caption.weight(.bold))
-                .frame(width: 18, height: 18)
-                .background(Circle().fill(.quaternary))
-            Text(text).font(.system(size: 12.5))
-            Spacer()
         }
     }
 }

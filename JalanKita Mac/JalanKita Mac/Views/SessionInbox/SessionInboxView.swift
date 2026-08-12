@@ -12,6 +12,8 @@
 //
 
 import SwiftUI
+import UniformTypeIdentifiers
+import JalanKitaKit
 
 struct SessionInboxView: View {
     @Bindable var model: AppModel
@@ -19,6 +21,10 @@ struct SessionInboxView: View {
     @State private var selection: Session.ID?
     @State private var searchText = ""
     @State private var sortOrder = [KeyPathComparator(\Session.roadName)]
+    @State private var showingPhotoImporter = false
+    @State private var showingVideoImporter = false
+    @State private var importError: String?
+    @State private var pendingDeletionID: Session.ID?
 
     private var filteredSessions: [Session] {
         let base = searchText.isEmpty
@@ -35,18 +41,27 @@ struct SessionInboxView: View {
     }
 
     var body: some View {
-        HSplitView {
-            table
-                .frame(minWidth: 560)
+        Group {
+            if model.sessions.isEmpty {
+                ContentUnavailableView(
+                    "Belum ada sesi", systemImage: "tray",
+                    description: Text("Sesi akan muncul di sini setelah surveyor menyinkronkan rekaman dari iPhone, atau unggah foto/video secara manual lewat menu \"Unggah…\" di atas.")
+                )
+            } else {
+                HSplitView {
+                    table
+                        .frame(minWidth: 560)
 
-            if let selectedSession {
-                SessionDetailPanel(session: selectedSession)
-                    .frame(minWidth: 380, idealWidth: 420, maxWidth: 480)
+                    if let selectedSession {
+                        SessionDetailPanel(session: selectedSession, model: model)
+                            .frame(minWidth: 380, idealWidth: 420, maxWidth: 480)
+                    }
+                }
             }
         }
         .searchable(text: $searchText, placement: .toolbar, prompt: "Cari jalan atau surveyor")
         .navigationTitle("Sesi masuk")
-        .navigationSubtitle("3 baru · 7,4 GB diterima tadi malam")
+        .navigationSubtitle("\(model.newSessionsCount) baru · \(formattedGB(model.totalSizeGB)) GB total")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
@@ -56,10 +71,107 @@ struct SessionInboxView: View {
                 }
                 .disabled(model.batchSelectedCount == 0)
             }
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Button("Foto…") { showingPhotoImporter = true }
+                    Button("Video…") { showingVideoImporter = true }
+                } label: {
+                    Label("Unggah…", systemImage: "square.and.arrow.up")
+                }
+            }
+        }
+        .fileImporter(isPresented: $showingPhotoImporter, allowedContentTypes: [.image]) { result in
+            handlePhotoImport(result)
+        }
+        .fileImporter(isPresented: $showingVideoImporter, allowedContentTypes: [.movie]) { result in
+            handleVideoImport(result)
+        }
+        .alert("Unggah gagal", isPresented: .constant(importError != nil), presenting: importError) { _ in
+            Button("OK") { importError = nil }
+        } message: { message in
+            Text(message)
+        }
+        .alert("Hapus sesi ini?", isPresented: .constant(pendingDeletionID != nil), presenting: pendingDeletionID) { id in
+            Button("Hapus", role: .destructive) {
+                model.deleteSession(id)
+                pendingDeletionID = nil
+            }
+            Button("Batal", role: .cancel) { pendingDeletionID = nil }
+        } message: { _ in
+            Text("Video dan hasil analisis sesi ini akan dihapus permanen dari Mac ini.")
         }
         .onAppear {
             if selection == nil { selection = filteredSessions.first?.id }
         }
+    }
+
+    private func formattedGB(_ value: Double) -> String {
+        value.formatted(.number.locale(Locale(identifier: "id_ID")).precision(.fractionLength(1)))
+    }
+
+    private func handlePhotoImport(_ result: Result<URL, Error>) {
+        switch result {
+        case .failure(let error):
+            importError = error.localizedDescription
+        case .success(let pickedURL):
+            guard pickedURL.startAccessingSecurityScopedResource() else {
+                importError = "Tidak bisa mengakses berkas yang dipilih."
+                return
+            }
+            defer { pickedURL.stopAccessingSecurityScopedResource() }
+            do {
+                let staged = try Self.stagePhotoForWorker(pickedURL)
+                model.uploadImage(url: staged)
+            } catch {
+                importError = error.localizedDescription
+            }
+        }
+    }
+
+    private func handleVideoImport(_ result: Result<URL, Error>) {
+        switch result {
+        case .failure(let error):
+            importError = error.localizedDescription
+        case .success(let pickedURL):
+            guard pickedURL.startAccessingSecurityScopedResource() else {
+                importError = "Tidak bisa mengakses berkas yang dipilih."
+                return
+            }
+            defer { pickedURL.stopAccessingSecurityScopedResource() }
+            do {
+                let staged = try Self.stageVideoForWorker(pickedURL)
+                model.uploadVideo(url: staged)
+            } catch {
+                importError = error.localizedDescription
+            }
+        }
+    }
+
+    /// Copies the picked photo into `FileManager.temporaryDirectory` (inside
+    /// the app's own sandbox container) so `InferenceService`'s subprocess
+    /// worker can open it by a plain path — the security-scoped access
+    /// `.fileImporter` grants is only valid for reads made by this
+    /// (sandboxed) process, not the separate worker subprocess.
+    private static func stagePhotoForWorker(_ sourceURL: URL) throws -> URL {
+        let stagingDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("uploads", isDirectory: true)
+        try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
+        let ext = sourceURL.pathExtension.isEmpty ? "jpg" : sourceURL.pathExtension
+        let destination = stagingDir.appendingPathComponent(UUID().uuidString).appendingPathExtension(ext)
+        try FileManager.default.copyItem(at: sourceURL, to: destination)
+        return destination
+    }
+
+    /// Same sandbox-staging reasoning as `stagePhotoForWorker`, for the v13
+    /// car-detection subprocess instead of the disturbance worker.
+    private static func stageVideoForWorker(_ sourceURL: URL) throws -> URL {
+        let stagingDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("video-uploads", isDirectory: true)
+        try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
+        let ext = sourceURL.pathExtension.isEmpty ? "mov" : sourceURL.pathExtension
+        let destination = stagingDir.appendingPathComponent(UUID().uuidString).appendingPathExtension(ext)
+        try FileManager.default.copyItem(at: sourceURL, to: destination)
+        return destination
     }
 
     /// Pinned above the table via `.safeAreaInset`, not stacked as a
@@ -79,14 +191,16 @@ struct SessionInboxView: View {
     private var statRow: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
-                StatTile(title: "MENUNGGU DIPROSES", value: "\(model.queuedSessions.count)", unit: "sesi", detail: "± 2 j 40 m komputasi")
+                StatTile(title: "MENUNGGU DIPROSES", value: "\(model.newSessionsCount)", unit: "sesi")
                 Divider()
-                StatTile(title: "PERLU VERIFIKASI", value: "\(model.unreviewedFindingsCount)", unit: nil,
-                         detail: "temuan belum dilihat", accent: Severity.urgent.literalColor)
+                StatTile(title: "TOTAL SESI", value: "\(model.sessions.count)", unit: nil,
+                         detail: "\(model.surveyorCount) surveyor")
                 Divider()
-                StatTile(title: "CAKUPAN MINGGU INI", value: "92,4", unit: "km", detail: "\(model.surveyorCount) surveyor")
+                StatTile(title: "JARAK TERSURVEI", value: formattedGB(model.totalDistanceKm), unit: "km",
+                         detail: "\(model.doneSessionsCount) sesi selesai")
                 Divider()
-                StatTile(title: "SIAP DILAPORKAN", value: "16", unit: nil, detail: "segmen SEGERA terverifikasi")
+                StatTile(title: "PARKIR MENGGANGGU", value: "\(model.disturbanceCount)", unit: nil,
+                         detail: "kendaraan terdeteksi", accent: Severity.urgent.literalColor)
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 14)
@@ -144,6 +258,16 @@ struct SessionInboxView: View {
             .width(min: 110, ideal: 140)
         }
         .safeAreaInset(edge: .top, spacing: 0) { statRow }
+        .contextMenu(forSelectionType: Session.ID.self) { ids in
+            if let id = ids.first {
+                Button("Hapus sesi…", role: .destructive) {
+                    pendingDeletionID = id
+                }
+            }
+        }
+        .onDeleteCommand {
+            if let selection { pendingDeletionID = selection }
+        }
     }
 
     private func measurement(_ value: Double, unit: String) -> some View {
@@ -186,7 +310,7 @@ struct SessionInboxView: View {
     private func processBatch() {
         for index in model.sessions.indices where model.sessions[index].selectedForBatch {
             if case .readyToProcess = model.sessions[index].status {
-                model.sessions[index].status = .segmenting(progress: 0)
+                model.startProcessing(sessionID: model.sessions[index].id)
             }
             model.sessions[index].selectedForBatch = false
         }
