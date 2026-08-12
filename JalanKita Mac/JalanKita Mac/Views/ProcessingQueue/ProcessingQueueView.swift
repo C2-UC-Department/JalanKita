@@ -24,7 +24,7 @@ struct ProcessingQueueView: View {
     private var queue: [Session] { model.queuedSessions }
 
     private var active: Session? {
-        queue.first { $0.id == selection } ?? queue.first
+        queue.first { $0.id == selection } ?? queue.first(where: isRunning) ?? queue.first
     }
 
     var body: some View {
@@ -53,8 +53,24 @@ struct ProcessingQueueView: View {
             ToolbarItem { Button("Log lengkap") {} }
         }
         .onAppear {
-            if selection == nil { selection = queue.first?.id }
+            selectDefaultIfNeeded()
         }
+        .onChange(of: model.sessions) { _, _ in
+            selectDefaultIfNeeded()
+        }
+    }
+
+    /// Prefers whichever session is actively `.segmenting` over just
+    /// "first in the queue" — with synced sessions now waiting at
+    /// `.readyToProcess` for a manual "Proses" click (instead of
+    /// auto-starting), the queue can easily hold several sessions at once,
+    /// and a reviewer landing here after starting one wants to see IT, not
+    /// whichever one happens to sort first. Only touches the selection when
+    /// it's missing or no longer in the queue (finished/removed) — never
+    /// yanks the view away from a session someone deliberately clicked on.
+    private func selectDefaultIfNeeded() {
+        guard selection == nil || !queue.contains(where: { $0.id == selection }) else { return }
+        selection = queue.first(where: isRunning)?.id ?? queue.first?.id
     }
 
     private func isRunning(_ session: Session) -> Bool {
@@ -64,10 +80,9 @@ struct ProcessingQueueView: View {
 
     private var todaySummary: some View {
         VStack(alignment: .leading, spacing: 8) {
-            SectionLabel(text: "HARI INI")
-            todayStat("Sesi selesai", "4")
-            todayStat("Frame dinilai", "958")
-            todayStat("Waktu komputasi", "3 j 12 m")
+            SectionLabel(text: "RINGKASAN")
+            todayStat("Sesi selesai", "\(model.doneSessionsCount)")
+            todayStat("Kendaraan diproses", "\(model.totalVehiclesAnalyzed)")
         }
         .padding(12)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
@@ -94,22 +109,30 @@ struct ProcessingQueueView: View {
 
                 HStack(spacing: 24) {
                     progressStat("KEMAJUAN", progressText(for: session), color: .accentColor)
-                    progressStat("SISA", "38 mnt", color: .primary)
-                    progressStat("LAJU", "1,04 f/d", color: .primary)
                     Spacer()
                 }
 
-                VStack(spacing: 10) {
-                    ForEach(model.pipelineSteps) { step in
-                        PipelineStepRow(step: step)
+                if steps(for: session).isEmpty {
+                    Text("Belum diproses — pilih sesi ini lalu klik \"Proses\".")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                } else {
+                    VStack(spacing: 10) {
+                        ForEach(steps(for: session)) { step in
+                            PipelineStepRow(step: step)
+                        }
                     }
                 }
 
-                LogConsoleView(lines: model.logLines)
+                LogConsoleView(lines: model.logLines[session.id] ?? [])
                     .frame(height: 190)
             }
             .padding(24)
         }
+    }
+
+    private func steps(for session: Session) -> [PipelineStep] {
+        model.pipelineSteps[session.id] ?? []
     }
 
     private func progressStat(_ title: String, _ value: String, color: Color) -> some View {

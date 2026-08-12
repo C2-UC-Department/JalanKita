@@ -36,13 +36,9 @@ struct QueueRow: View {
             switch session.status {
             case .segmenting(let progress):
                 ProgressView(value: progress)
-                HStack {
-                    Text("Segmentasi · \(Int(progress * 100))%")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(Color.accentColor)
-                    Spacer()
-                    Text("38 mnt").font(.data(11)).foregroundStyle(.secondary)
-                }
+                Text("Segmentasi · \(Int(progress * 100))%")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.accentColor)
             default:
                 Text("Menunggu")
                     .font(.caption)

@@ -24,6 +24,7 @@ struct SessionInboxView: View {
     @State private var showingPhotoImporter = false
     @State private var showingVideoImporter = false
     @State private var importError: String?
+    @State private var pendingDeletionID: Session.ID?
 
     private var filteredSessions: [Session] {
         let base = searchText.isEmpty
@@ -40,18 +41,27 @@ struct SessionInboxView: View {
     }
 
     var body: some View {
-        HSplitView {
-            table
-                .frame(minWidth: 560)
+        Group {
+            if model.sessions.isEmpty {
+                ContentUnavailableView(
+                    "Belum ada sesi", systemImage: "tray",
+                    description: Text("Sesi akan muncul di sini setelah surveyor menyinkronkan rekaman dari iPhone, atau unggah foto/video secara manual lewat menu \"Unggah…\" di atas.")
+                )
+            } else {
+                HSplitView {
+                    table
+                        .frame(minWidth: 560)
 
-            if let selectedSession {
-                SessionDetailPanel(session: selectedSession, model: model)
-                    .frame(minWidth: 380, idealWidth: 420, maxWidth: 480)
+                    if let selectedSession {
+                        SessionDetailPanel(session: selectedSession, model: model)
+                            .frame(minWidth: 380, idealWidth: 420, maxWidth: 480)
+                    }
+                }
             }
         }
         .searchable(text: $searchText, placement: .toolbar, prompt: "Cari jalan atau surveyor")
         .navigationTitle("Sesi masuk")
-        .navigationSubtitle("3 baru · 7,4 GB diterima tadi malam")
+        .navigationSubtitle("\(model.newSessionsCount) baru · \(formattedGB(model.totalSizeGB)) GB total")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
@@ -81,9 +91,22 @@ struct SessionInboxView: View {
         } message: { message in
             Text(message)
         }
+        .alert("Hapus sesi ini?", isPresented: .constant(pendingDeletionID != nil), presenting: pendingDeletionID) { id in
+            Button("Hapus", role: .destructive) {
+                model.deleteSession(id)
+                pendingDeletionID = nil
+            }
+            Button("Batal", role: .cancel) { pendingDeletionID = nil }
+        } message: { _ in
+            Text("Video dan hasil analisis sesi ini akan dihapus permanen dari Mac ini.")
+        }
         .onAppear {
             if selection == nil { selection = filteredSessions.first?.id }
         }
+    }
+
+    private func formattedGB(_ value: Double) -> String {
+        value.formatted(.number.locale(Locale(identifier: "id_ID")).precision(.fractionLength(1)))
     }
 
     private func handlePhotoImport(_ result: Result<URL, Error>) {
@@ -168,14 +191,16 @@ struct SessionInboxView: View {
     private var statRow: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
-                StatTile(title: "MENUNGGU DIPROSES", value: "\(model.queuedSessions.count)", unit: "sesi", detail: "± 2 j 40 m komputasi")
+                StatTile(title: "MENUNGGU DIPROSES", value: "\(model.newSessionsCount)", unit: "sesi")
                 Divider()
-                StatTile(title: "PERLU VERIFIKASI", value: "\(model.unreviewedFindingsCount)", unit: nil,
-                         detail: "temuan belum dilihat", accent: Severity.urgent.literalColor)
+                StatTile(title: "TOTAL SESI", value: "\(model.sessions.count)", unit: nil,
+                         detail: "\(model.surveyorCount) surveyor")
                 Divider()
-                StatTile(title: "CAKUPAN MINGGU INI", value: "92,4", unit: "km", detail: "\(model.surveyorCount) surveyor")
+                StatTile(title: "JARAK TERSURVEI", value: formattedGB(model.totalDistanceKm), unit: "km",
+                         detail: "\(model.doneSessionsCount) sesi selesai")
                 Divider()
-                StatTile(title: "SIAP DILAPORKAN", value: "16", unit: nil, detail: "segmen SEGERA terverifikasi")
+                StatTile(title: "PARKIR MENGGANGGU", value: "\(model.disturbanceCount)", unit: nil,
+                         detail: "kendaraan terdeteksi", accent: Severity.urgent.literalColor)
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 14)
@@ -233,6 +258,16 @@ struct SessionInboxView: View {
             .width(min: 110, ideal: 140)
         }
         .safeAreaInset(edge: .top, spacing: 0) { statRow }
+        .contextMenu(forSelectionType: Session.ID.self) { ids in
+            if let id = ids.first {
+                Button("Hapus sesi…", role: .destructive) {
+                    pendingDeletionID = id
+                }
+            }
+        }
+        .onDeleteCommand {
+            if let selection { pendingDeletionID = selection }
+        }
     }
 
     private func measurement(_ value: Double, unit: String) -> some View {
@@ -275,7 +310,7 @@ struct SessionInboxView: View {
     private func processBatch() {
         for index in model.sessions.indices where model.sessions[index].selectedForBatch {
             if case .readyToProcess = model.sessions[index].status {
-                model.sessions[index].status = .segmenting(progress: 0)
+                model.startProcessing(sessionID: model.sessions[index].id)
             }
             model.sessions[index].selectedForBatch = false
         }

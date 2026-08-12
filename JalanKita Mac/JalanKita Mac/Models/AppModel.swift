@@ -34,13 +34,14 @@ import JalanKitaKit
 final class AppModel {
     var selection: AppSection = .sessionInbox
 
-    /// Persisted to disk once any real session exists (upload or sync) —
-    /// falls back to `SampleData.sessions` only on a genuinely first launch.
-    /// Previously in-memory only, which meant a crash or relaunch silently
-    /// erased every uploaded/synced session with no way back to it — not
-    /// just an inconvenience, but the thing that made a "Buka Video" crash
-    /// unreproducible after the app quit.
-    var sessions: [Session] = AppModel.loadSessions() ?? SampleData.sessions {
+    /// Persisted to disk once any real session exists (upload or sync).
+    /// Starts empty, not sample data — a genuinely first launch should show
+    /// a real empty state, not 7 fake Surabaya sessions that look real but
+    /// aren't. Previously in-memory only, which meant a crash or relaunch
+    /// silently erased every uploaded/synced session with no way back to
+    /// it — not just an inconvenience, but the thing that made a "Buka
+    /// Video" crash unreproducible after the app quit.
+    var sessions: [Session] = AppModel.loadSessions() ?? [] {
         didSet { Self.saveSessions(sessions) }
     }
     var segments: [SegmentResult] = SampleData.segments
@@ -60,11 +61,19 @@ final class AppModel {
         didSet { Self.saveParkingAnalyses(parkingAnalyses) }
     }
 
-    /// `var`, not `let` — SampleData.pipelineSteps is the at-rest/default
-    /// state; `uploadImage(url:)` resets to it per run and then drives it
-    /// live from the worker's stderr progress events (applyProgress).
-    var pipelineSteps: [PipelineStep] = SampleData.pipelineSteps
-    var logLines: [LogLine] = SampleData.logLines
+    /// Per session, not one shared array — a session's own steps are seeded
+    /// when its processing starts (`Self.photoPipelineSteps`/
+    /// `Self.videoPipelineSteps`) and then driven live from the worker's
+    /// stderr/progress events (`applyProgress`/`applyCarDetectionProgress`).
+    /// Persisted like `parkingAnalyses`, so a session's history survives a
+    /// relaunch and clicking any past session in Antrean shows its own real
+    /// data, not whatever a single shared array last happened to hold.
+    var pipelineSteps: [Session.ID: [PipelineStep]] = AppModel.loadPipelineSteps() {
+        didSet { Self.savePipelineSteps(pipelineSteps) }
+    }
+    var logLines: [Session.ID: [LogLine]] = AppModel.loadLogLines() {
+        didSet { Self.saveLogLines(logLines) }
+    }
 
     /// Findings the reviewer has already accepted/rejected this session,
     /// keyed by Finding.id — drives the review workflow's progress badge.
@@ -181,6 +190,39 @@ final class AppModel {
         Set(sessions.map(\.surveyor.id)).count
     }
 
+    /// Sessions synced from an iPhone that haven't been started yet — see
+    /// `startProcessing`. A manual upload never sits in this state (it
+    /// starts immediately), so this is effectively "how many synced
+    /// sessions are waiting for a batch-process click."
+    var newSessionsCount: Int {
+        sessions.filter { if case .readyToProcess = $0.status { return true }; return false }.count
+    }
+
+    var totalDistanceKm: Double {
+        sessions.reduce(0) { $0 + $1.distanceKm }
+    }
+
+    var totalSizeGB: Double {
+        sessions.reduce(0) { $0 + $1.sizeGB }
+    }
+
+    var doneSessionsCount: Int {
+        sessions.filter { $0.status == .done }.count
+    }
+
+    var totalVehiclesAnalyzed: Int {
+        parkingAnalyses.values.reduce(0) { $0 + $1.count }
+    }
+
+    /// Real parking-violation count across every session's results — the
+    /// pipeline that actually works today, replacing the old fake
+    /// "segments ready to report" tile (segments have no real producer yet).
+    var disturbanceCount: Int {
+        parkingAnalyses.values.reduce(0) { count, analyses in
+            count + analyses.filter { $0.carCandidate?.disturbance == true }.count
+        }
+    }
+
     func toggleBatchSelection(for sessionID: Session.ID) {
         guard let index = sessions.firstIndex(where: { $0.id == sessionID }) else { return }
         sessions[index].selectedForBatch.toggle()
@@ -213,7 +255,7 @@ final class AppModel {
         )
         sessions.append(session)
         activeUploadSessionID = sessionID
-        pipelineSteps = SampleData.pipelineSteps
+        pipelineSteps[sessionID] = Self.photoPipelineSteps
         selection = .queue
 
         Task {
@@ -247,7 +289,7 @@ final class AppModel {
         } catch {
             activeUploadSessionID = nil
             updateSessionStatus(sessionID, .failed(reason: error.localizedDescription))
-            logLines.insert(LogLine(time: Self.logTimeFormatter.string(from: Date()),
+            logLines[sessionID, default: []].insert(LogLine(time: Self.logTimeFormatter.string(from: Date()),
                                     message: "Analisis gagal: \(error.localizedDescription)",
                                     isWarning: true), at: 0)
         }
@@ -293,7 +335,7 @@ final class AppModel {
         )
         sessions.append(session)
         activeUploadSessionID = sessionID
-        pipelineSteps = Self.videoPipelineSteps
+        pipelineSteps[sessionID] = Self.videoPipelineSteps
         selection = .queue
 
         Task {
@@ -311,26 +353,37 @@ final class AppModel {
             sessions[index].durationSeconds = duration
         }
         do {
-            pipelineSteps[0].state = .active
+            pipelineSteps[sessionID]?[0].state = .active
+            // v13 only ever reports frame-progress numbers (no structured
+            // log events the way the disturbance worker does), so without
+            // this the log console stays completely silent through the
+            // entire car-detection stage — easy to mistake for "not
+            // running" during model load, before the first progress line.
+            logLines[sessionID, default: []].insert(LogLine(
+                time: Self.logTimeFormatter.string(from: Date()),
+                message: "Memulai deteksi mobil (v13)…", isWarning: false), at: 0)
             let workDir = Self.carDetectionWorkDir(sessionID: sessionID)
             let detection = try await carDetectionService.detect(video: videoURL, workDir: workDir)
-            pipelineSteps[0].state = .done
-            pipelineSteps[0].detail = "selesai"
-            pipelineSteps[0].subProgress = 1.0
+            pipelineSteps[sessionID]?[0].state = .done
+            pipelineSteps[sessionID]?[0].detail = "selesai"
+            pipelineSteps[sessionID]?[0].subProgress = 1.0
 
             let candidates = detection.summary.carsDetectedParked
+            logLines[sessionID, default: []].insert(LogLine(
+                time: Self.logTimeFormatter.string(from: Date()),
+                message: "Deteksi mobil selesai — \(candidates.count) kandidat terparkir.", isWarning: false), at: 0)
             guard !candidates.isEmpty else {
                 activeUploadSessionID = nil
                 updateSessionStatus(sessionID, .done)
                 parkingAnalyses[sessionID] = []
-                pipelineSteps[1].detail = "tidak ada"
-                logLines.insert(LogLine(time: Self.logTimeFormatter.string(from: Date()),
+                pipelineSteps[sessionID]?[1].detail = "tidak ada"
+                logLines[sessionID, default: []].insert(LogLine(time: Self.logTimeFormatter.string(from: Date()),
                                         message: "Tidak ada mobil PARKED terdeteksi di video ini.",
                                         isWarning: false), at: 0)
                 return
             }
 
-            pipelineSteps[1].state = .active
+            pipelineSteps[sessionID]?[1].state = .active
             var analyses: [ParkingAnalysis] = []
             for (index, candidate) in candidates.enumerated() {
                 let imagePath = detection.screenshotDir.appendingPathComponent(candidate.fileClean)
@@ -348,15 +401,15 @@ final class AppModel {
                         carCandidate: candidate, sessionRelativeSeconds: candidate.midSeconds
                     ))
                 } catch {
-                    logLines.insert(LogLine(
+                    logLines[sessionID, default: []].insert(LogLine(
                         time: Self.logTimeFormatter.string(from: Date()),
                         message: "OFRSNet gagal untuk mobil #\(candidate.trackID): \(error.localizedDescription)",
                         isWarning: true), at: 0)
                 }
-                pipelineSteps[1].subProgress = Double(index + 1) / Double(candidates.count)
-                pipelineSteps[1].detail = "\(index + 1)/\(candidates.count)"
+                pipelineSteps[sessionID]?[1].subProgress = Double(index + 1) / Double(candidates.count)
+                pipelineSteps[sessionID]?[1].detail = "\(index + 1)/\(candidates.count)"
             }
-            pipelineSteps[1].state = .done
+            pipelineSteps[sessionID]?[1].state = .done
 
             activeUploadSessionID = nil
             updateSessionStatus(sessionID, analyses.isEmpty ? .failed(reason: "Semua analisis OFRSNet gagal.") : .done)
@@ -367,7 +420,7 @@ final class AppModel {
         } catch {
             activeUploadSessionID = nil
             updateSessionStatus(sessionID, .failed(reason: error.localizedDescription))
-            logLines.insert(LogLine(time: Self.logTimeFormatter.string(from: Date()),
+            logLines[sessionID, default: []].insert(LogLine(time: Self.logTimeFormatter.string(from: Date()),
                                     message: "Deteksi mobil gagal: \(error.localizedDescription)",
                                     isWarning: true), at: 0)
         }
@@ -378,10 +431,16 @@ final class AppModel {
     /// which synthesizes a brand-new placeholder `Session` with fabricated
     /// fields. A synced session already carries real GPS/duration/surveyor
     /// data from the iPhone that must be preserved, so this inserts/updates
-    /// that real `Session` instead. Multi-clip sessions run car detection
-    /// PER CLIP and merge candidate lists — concatenating clips first would
-    /// reintroduce the lossy re-encode step the iOS side's per-clip
-    /// finalization (`movieFragmentInterval`) was chosen to avoid.
+    /// that real `Session` instead.
+    ///
+    /// Deliberately does NOT start processing — unlike a manual upload
+    /// (which starts immediately, since a human just explicitly chose to
+    /// upload it), a synced session lands in Sesi Masuk at whatever status
+    /// iOS gave it (`.readyToProcess`/`.degraded`) and waits for a real
+    /// batch-select + "Proses" click (see `startProcessing`). `clipURLs` is
+    /// intentionally unused here — `startProcessing` reconstructs them
+    /// later via `SessionVideoAssetBuilder`, from the same stable path
+    /// `SyncedSessionIngestor` already wrote them to.
     func ingestSyncedSession(_ session: Session, clipURLs: [URL], zoneID: CKRecordZone.ID) {
         if let index = sessions.firstIndex(where: { $0.id == session.id }) {
             sessions[index] = session
@@ -389,9 +448,57 @@ final class AppModel {
             sessions.append(session)
         }
         surveyorZones[session.surveyor.name] = zoneID
-        updateSessionStatus(session.id, .segmenting(progress: 0))
+    }
+
+    /// Real trigger for a synced session sitting at `.readyToProcess` —
+    /// called from Session Inbox's batch "Proses" action and
+    /// `SessionDetailPanel`'s "Proses sekarang" button. Multi-clip sessions
+    /// run car detection PER CLIP and merge candidate lists — concatenating
+    /// clips first would reintroduce the lossy re-encode step the iOS
+    /// side's per-clip finalization (`movieFragmentInterval`) was chosen to
+    /// avoid.
+    func startProcessing(sessionID: Session.ID) {
+        guard let session = sessions.first(where: { $0.id == sessionID }) else { return }
+        let clipURLs = SessionVideoAssetBuilder.clipURLs(for: session)
+        guard !clipURLs.isEmpty else {
+            logLines[sessionID, default: []].insert(LogLine(
+                time: Self.logTimeFormatter.string(from: Date()),
+                message: "Tidak menemukan berkas klip untuk sesi ini.",
+                isWarning: true), at: 0)
+            return
+        }
+        guard let zoneID = surveyorZones[session.surveyor.name] else {
+            logLines[sessionID, default: []].insert(LogLine(
+                time: Self.logTimeFormatter.string(from: Date()),
+                message: "Zona iCloud surveyor ini tidak diketahui — tidak bisa memproses.",
+                isWarning: true), at: 0)
+            return
+        }
+        activeUploadSessionID = sessionID
+        pipelineSteps[sessionID] = Self.videoPipelineSteps
+        updateSessionStatus(sessionID, .segmenting(progress: 0))
         Task {
-            await runSyncedSessionAnalysis(sessionID: session.id, clipURLs: clipURLs, zoneID: zoneID)
+            await runSyncedSessionAnalysis(sessionID: sessionID, clipURLs: clipURLs, zoneID: zoneID)
+        }
+    }
+
+    /// Removes a session and everything derived from it — the metadata
+    /// (`parkingAnalyses`/`pipelineSteps`/`logLines`), and its on-disk video
+    /// files, so a deleted session doesn't leave orphaned footage behind.
+    func deleteSession(_ sessionID: Session.ID) {
+        guard let session = sessions.first(where: { $0.id == sessionID }) else { return }
+        sessions.removeAll { $0.id == sessionID }
+        parkingAnalyses.removeValue(forKey: sessionID)
+        pipelineSteps.removeValue(forKey: sessionID)
+        logLines.removeValue(forKey: sessionID)
+        manualUploadsPushed.remove(sessionID)
+
+        let fm = FileManager.default
+        try? fm.removeItem(at: Self.syncedSessionsDir().appendingPathComponent(sessionID, isDirectory: true))
+        try? fm.removeItem(at: Self.manualUploadsDir(sessionID: sessionID))
+        try? fm.removeItem(at: Self.carDetectionWorkDir(sessionID: sessionID))
+        for clipIndex in 0..<session.clipCount {
+            try? fm.removeItem(at: Self.carDetectionWorkDir(sessionID: "\(sessionID)-clip\(clipIndex)"))
         }
     }
 
@@ -407,6 +514,10 @@ final class AppModel {
             cumulativeOffset += await Self.probeDurationSeconds(url: clipURL) ?? 0
         }
 
+        pipelineSteps[sessionID]?[0].state = .active
+        logLines[sessionID, default: []].insert(LogLine(
+            time: Self.logTimeFormatter.string(from: Date()),
+            message: "Memulai deteksi mobil (v13) untuk \(clipURLs.count) klip…", isWarning: false), at: 0)
         var candidatePairs: [(candidate: CarCandidate, screenshotDir: URL, clipIndex: Int)] = []
         for (clipIndex, clipURL) in clipURLs.enumerated() {
             let workDir = Self.carDetectionWorkDir(sessionID: "\(sessionID)-clip\(clipIndex)")
@@ -414,22 +525,31 @@ final class AppModel {
                 let detection = try await carDetectionService.detect(video: clipURL, workDir: workDir)
                 candidatePairs += detection.summary.carsDetectedParked.map { ($0, detection.screenshotDir, clipIndex) }
             } catch {
-                logLines.insert(LogLine(
+                logLines[sessionID, default: []].insert(LogLine(
                     time: Self.logTimeFormatter.string(from: Date()),
                     message: "Deteksi mobil gagal (klip \(clipIndex), sesi tersinkron): \(error.localizedDescription)",
                     isWarning: true), at: 0)
             }
             updateSessionStatus(sessionID, .segmenting(progress: Double(clipIndex + 1) / Double(clipURLs.count) / 2))
         }
+        pipelineSteps[sessionID]?[0].state = .done
+        pipelineSteps[sessionID]?[0].detail = "selesai"
+        pipelineSteps[sessionID]?[0].subProgress = 1.0
+        logLines[sessionID, default: []].insert(LogLine(
+            time: Self.logTimeFormatter.string(from: Date()),
+            message: "Deteksi mobil selesai — \(candidatePairs.count) kandidat terparkir.", isWarning: false), at: 0)
 
         guard !candidatePairs.isEmpty else {
+            activeUploadSessionID = nil
             updateSessionStatus(sessionID, .done)
             parkingAnalyses[sessionID] = []
+            pipelineSteps[sessionID]?[1].detail = "tidak ada"
             pushSessionStatus(sessionID: sessionID, zoneID: zoneID)
             await syncNow()
             return
         }
 
+        pipelineSteps[sessionID]?[1].state = .active
         var analyses: [ParkingAnalysis] = []
         for (index, pair) in candidatePairs.enumerated() {
             let imagePath = pair.screenshotDir.appendingPathComponent(pair.candidate.fileClean)
@@ -445,14 +565,18 @@ final class AppModel {
                 analyses.append(analysis)
                 pushParkingResult(analysis, zoneID: zoneID)
             } catch {
-                logLines.insert(LogLine(
+                logLines[sessionID, default: []].insert(LogLine(
                     time: Self.logTimeFormatter.string(from: Date()),
                     message: "OFRSNet gagal untuk mobil #\(pair.candidate.trackID) (sesi tersinkron): \(error.localizedDescription)",
                     isWarning: true), at: 0)
             }
+            pipelineSteps[sessionID]?[1].subProgress = Double(index + 1) / Double(candidatePairs.count)
+            pipelineSteps[sessionID]?[1].detail = "\(index + 1)/\(candidatePairs.count)"
             updateSessionStatus(sessionID, .segmenting(progress: 0.5 + Double(index + 1) / Double(candidatePairs.count) / 2))
         }
+        pipelineSteps[sessionID]?[1].state = .done
 
+        activeUploadSessionID = nil
         updateSessionStatus(sessionID, analyses.isEmpty ? .failed(reason: "Semua analisis OFRSNet gagal.") : .done)
         parkingAnalyses[sessionID] = analyses
         pushSessionStatus(sessionID: sessionID, zoneID: zoneID)
@@ -498,16 +622,16 @@ final class AppModel {
             let bevPath = try await inferenceService.renderBEV(analysisID: analysisID, vehicleID: vehicleID)
             parkingAnalyses[sessionID]?[index].bevPNGPath = bevPath
         } catch {
-            logLines.insert(LogLine(time: Self.logTimeFormatter.string(from: Date()),
+            logLines[sessionID, default: []].insert(LogLine(time: Self.logTimeFormatter.string(from: Date()),
                                     message: "Render ulang BEV gagal: \(error.localizedDescription)",
                                     isWarning: true), at: 0)
         }
     }
 
     private func applyCarDetectionProgress(_ progress: CarDetectionProgress) {
-        guard !pipelineSteps.isEmpty else { return }
-        pipelineSteps[0].subProgress = progress.fraction
-        pipelineSteps[0].detail = "\(progress.framesDone)/\(progress.framesTotal) frame"
+        guard let activeUploadSessionID, pipelineSteps[activeUploadSessionID]?.isEmpty == false else { return }
+        pipelineSteps[activeUploadSessionID]?[0].subProgress = progress.fraction
+        pipelineSteps[activeUploadSessionID]?[0].detail = "\(progress.framesDone)/\(progress.framesTotal) frame"
         updateQueueProgress()
     }
 
@@ -584,13 +708,9 @@ final class AppModel {
 
     private static var sessionsFileURL: URL { appSupportDir().appendingPathComponent("sessions.json") }
 
-    /// nil (not an empty array) when nothing's been persisted yet, so the
-    /// `sessions` property initializer can fall back to `SampleData.sessions`
-    /// on a genuinely first launch instead of showing an empty list.
     private static func loadSessions() -> [Session]? {
         guard let data = try? Data(contentsOf: sessionsFileURL),
-              let sessions = try? JSONDecoder().decode([Session].self, from: data),
-              !sessions.isEmpty
+              let sessions = try? JSONDecoder().decode([Session].self, from: data)
         else { return nil }
         return sessions
     }
@@ -628,6 +748,55 @@ final class AppModel {
         try? data.write(to: manualUploadsPushedFileURL, options: .atomic)
     }
 
+    private static var pipelineStepsFileURL: URL { appSupportDir().appendingPathComponent("pipeline_steps.json") }
+
+    private static func loadPipelineSteps() -> [Session.ID: [PipelineStep]] {
+        guard let data = try? Data(contentsOf: pipelineStepsFileURL),
+              let steps = try? JSONDecoder().decode([Session.ID: [PipelineStep]].self, from: data)
+        else { return [:] }
+        return steps
+    }
+
+    private static func savePipelineSteps(_ steps: [Session.ID: [PipelineStep]]) {
+        guard let data = try? JSONEncoder().encode(steps) else { return }
+        try? data.write(to: pipelineStepsFileURL, options: .atomic)
+    }
+
+    private static var logLinesFileURL: URL { appSupportDir().appendingPathComponent("log_lines.json") }
+
+    private static func loadLogLines() -> [Session.ID: [LogLine]] {
+        guard let data = try? Data(contentsOf: logLinesFileURL),
+              let lines = try? JSONDecoder().decode([Session.ID: [LogLine]].self, from: data)
+        else { return [:] }
+        return lines
+    }
+
+    private static func saveLogLines(_ lines: [Session.ID: [LogLine]]) {
+        guard let data = try? JSONEncoder().encode(lines) else { return }
+        try? data.write(to: logLinesFileURL, options: .atomic)
+    }
+
+    /// The parking-disturbance pipeline's own stages (`src/disturbance.py`
+    /// `analyze()`) — real pipeline metadata describing what the worker
+    /// actually does, not sample/placeholder content; moved out of
+    /// `SampleData.swift` since it's accurate for every photo, not just a
+    /// mock one. `.waiting` at rest; `applyProgress` drives state/detail
+    /// live from the worker's stderr events during `uploadImage(url:)`.
+    private static let photoPipelineSteps: [PipelineStep] = [
+        PipelineStep(id: 1, title: "Segmentasi semantik jalan", state: .waiting,
+                     detail: "menunggu",
+                     stats: "Mask2Former (jalan terlihat) + OFRSNet (patch jalan amodal)"),
+        PipelineStep(id: 2, title: "Deteksi instans kendaraan", state: .waiting,
+                     detail: "menunggu",
+                     stats: "model instans kendaraan, dengan fallback komponen-terhubung (blob) untuk dukungan yang tak terdeteksi"),
+        PipelineStep(id: 3, title: "Estimasi bidang tanah & tinggi kamera", state: .waiting,
+                     detail: "menunggu",
+                     stats: "RANSAC pada depth monokuler · skala metrik otomatis dari tinggi atap kendaraan terdeteksi"),
+        PipelineStep(id: 4, title: "Rasterisasi BEV & atribusi", state: .waiting,
+                     detail: "menunggu",
+                     stats: "proyeksi top-down · jejak kontak-tanah tiap kendaraan · atribusi area jalan tersembunyi per kendaraan"),
+    ]
+
     /// v13's own two natural stages, coarser than the disturbance worker's
     /// four — v13 only ever reports whole-video frame progress, and OFRSNet
     /// then runs once per PARKED-family car it found (subProgress here
@@ -645,15 +814,16 @@ final class AppModel {
 
     private func applyProgress(_ line: WorkerStderrLine) {
         let update = PipelineProgressParser.handle(line)
+        guard let activeUploadSessionID else { return }
         if let log = update.logLine {
-            logLines.insert(log, at: 0)
+            logLines[activeUploadSessionID, default: []].insert(log, at: 0)
         }
         if let stepID = update.stepID, let state = update.stepState,
-           let index = pipelineSteps.firstIndex(where: { $0.id == stepID }) {
-            pipelineSteps[index].state = state
-            pipelineSteps[index].detail = state == .done ? "selesai" : "berjalan"
+           let index = pipelineSteps[activeUploadSessionID]?.firstIndex(where: { $0.id == stepID }) {
+            pipelineSteps[activeUploadSessionID]?[index].state = state
+            pipelineSteps[activeUploadSessionID]?[index].detail = state == .done ? "selesai" : "berjalan"
             if state == .active, index > 0 {
-                pipelineSteps[index - 1].state = .done
+                pipelineSteps[activeUploadSessionID]?[index - 1].state = .done
             }
         }
         updateQueueProgress()
@@ -662,9 +832,11 @@ final class AppModel {
     private func updateQueueProgress() {
         guard let activeUploadSessionID,
               let index = sessions.firstIndex(where: { $0.id == activeUploadSessionID }),
-              case .segmenting = sessions[index].status else { return }
-        let doneCount = pipelineSteps.filter { $0.state == .done }.count
-        let progress = pipelineSteps.isEmpty ? 0 : Double(doneCount) / Double(pipelineSteps.count)
+              case .segmenting = sessions[index].status,
+              let steps = pipelineSteps[activeUploadSessionID]
+        else { return }
+        let doneCount = steps.filter { $0.state == .done }.count
+        let progress = steps.isEmpty ? 0 : Double(doneCount) / Double(steps.count)
         sessions[index].status = .segmenting(progress: progress)
     }
 
