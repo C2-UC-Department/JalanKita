@@ -41,22 +41,13 @@ struct SessionInboxView: View {
     }
 
     var body: some View {
-        Group {
-            if model.sessions.isEmpty {
-                ContentUnavailableView(
-                    "Belum ada sesi", systemImage: "tray",
-                    description: Text("Sesi akan muncul di sini setelah surveyor menyinkronkan rekaman dari iPhone, atau unggah foto/video secara manual lewat menu \"Unggah…\" di atas.")
-                )
-            } else {
-                HSplitView {
-                    table
-                        .frame(minWidth: 560)
+        HSplitView {
+            table
+                .frame(minWidth: 560)
 
-                    if let selectedSession {
-                        SessionDetailPanel(session: selectedSession, model: model)
-                            .frame(minWidth: 380, idealWidth: 420, maxWidth: 480)
-                    }
-                }
+            if let selectedSession {
+                SessionDetailPanel(session: selectedSession, model: model)
+                    .frame(minWidth: 380, idealWidth: 420, maxWidth: 480)
             }
         }
         .searchable(text: $searchText, placement: .toolbar, prompt: "Cari jalan atau surveyor")

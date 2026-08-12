@@ -29,22 +29,31 @@ struct ProcessingQueueView: View {
 
     var body: some View {
         HSplitView {
+            // `.listStyle(.sidebar)` pulls in NSVisualEffectView-based
+            // vibrancy meant for a genuine top-level app sidebar (like the
+            // real one on the far left) — this List is a secondary list
+            // inside a content pane, not that, and with zero rows that
+            // vibrancy rendered as a translucent block letting whatever
+            // sits behind the window bleed through instead of a normal
+            // opaque background. `.inset` is the correct style for a
+            // regular in-pane list and doesn't carry that vibrancy at all.
             List(queue, selection: $selection) { session in
                 QueueRow(session: session)
             }
-            .listStyle(.sidebar)
+            .listStyle(.inset)
             .safeAreaInset(edge: .bottom) {
                 todaySummary
             }
             .frame(minWidth: 280, idealWidth: 320, maxWidth: 380)
 
-            if let active {
-                detail(for: active)
-                    .frame(minWidth: 500)
-            } else {
-                ContentUnavailableView("Antrean kosong", systemImage: "tray")
-                    .frame(minWidth: 500)
+            Group {
+                if let active {
+                    detail(for: active)
+                } else {
+                    noActiveSession
+                }
             }
+            .frame(minWidth: 500)
         }
         .navigationTitle("Antrean pemrosesan")
         .navigationSubtitle("\(queue.filter(isRunning).count) berjalan · \(queue.count - queue.filter(isRunning).count) menunggu")
@@ -85,8 +94,32 @@ struct ProcessingQueueView: View {
             todayStat("Kendaraan diproses", "\(model.totalVehiclesAnalyzed)")
         }
         .padding(12)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+        // A flat, mostly-opaque fill — `.regularMaterial` here stacked its
+        // own blur on top of the sidebar's already-vibrant background,
+        // reading as washed-out/see-through rather than a distinct card.
+        // Same treatment as SidebarView's own pinned-bottom card.
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
         .padding(10)
+    }
+
+    /// Right pane when nothing's processing — keeps the same list-leftmost/
+    /// detail-rightmost layout Antrean always has (the queue list stays
+    /// visible and simply empty), rather than swapping the whole screen for
+    /// a separate empty-state layout.
+    private var noActiveSession: some View {
+        ContentUnavailableView {
+            Label("Tidak ada yang diproses", systemImage: "clock")
+        } description: {
+            Text("Pilih sesi yang siap diproses di Sesi Masuk lalu klik \"Proses\" untuk memulainya di sini.")
+        } actions: {
+            Button {
+                model.selection = .sessionInbox
+            } label: {
+                Label("Buka Sesi Masuk", systemImage: "tray.full")
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+        }
     }
 
     private func todayStat(_ title: String, _ value: String) -> some View {
