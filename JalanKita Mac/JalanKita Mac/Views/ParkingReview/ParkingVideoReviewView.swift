@@ -16,6 +16,14 @@
 //  "current" marker instead of letting playback advance), so the highlight
 //  only follows explicit taps, same as the old candidate-strip pattern.
 //
+//  There IS a separate periodic time-observer, for the flagged vehicle's
+//  bounding-box overlay drawn directly on the video — its box is only
+//  correct at the exact detected frame, so it's shown only while playback
+//  sits within a small tolerance of that timestamp and fades out the
+//  moment the reviewer scrubs or plays away. This observer only ever
+//  toggles that visibility flag, never seeks or touches selection, so it
+//  can't reintroduce the fight described above.
+//
 //  The video surface is `AVPlayerView` (AppKit, via `NSViewRepresentable`),
 //  NOT SwiftUI's `VideoPlayer` — confirmed by a real crash log that
 //  `VideoPlayer` aborts on this project with a Swift metadata-initialization
@@ -37,6 +45,8 @@ struct ParkingVideoReviewView: View {
     @State private var isLoadingVideo = true
     @State private var selectedAnalysisID: ParkingAnalysis.ID?
     @State private var selectedVehicleID: Int?
+    @State private var isNearSelectedTimestamp = true
+    @State private var timeObserverToken: Any?
 
     private var analyses: [ParkingAnalysis] {
         model.parkingAnalyses[session.id] ?? []
@@ -45,6 +55,18 @@ struct ParkingVideoReviewView: View {
     private var analysis: ParkingAnalysis? {
         guard let selectedAnalysisID else { return analyses.first }
         return analyses.first { $0.id == selectedAnalysisID } ?? analyses.first
+    }
+
+    private var selectedVehicle: VehicleSummary? {
+        analysis?.summary.vehicles.first { $0.id == selectedVehicleID }
+    }
+
+    /// The extracted screenshot's own aspect ratio — same frame the video's
+    /// pixels come from, so the bounding-box overlay's normalized rect
+    /// lines up with what's actually on screen.
+    private var videoAspectRatio: CGFloat {
+        guard let analysis, analysis.imageHeight > 0 else { return 16.0 / 9.0 }
+        return CGFloat(analysis.imageWidth) / CGFloat(analysis.imageHeight)
     }
 
     private var totalSeconds: Double {
@@ -72,10 +94,10 @@ struct ParkingVideoReviewView: View {
             .frame(minWidth: 480, maxWidth: .infinity)
 
             if let analysis {
-                VehicleCandidatesCanvasView(analysis: analysis, selectedVehicleID: $selectedVehicleID, showAllVehicles: false)
-                    .padding(24)
-                    .frame(minWidth: 360, maxWidth: 480)
-
+                // The detected-vehicle frame used to have its own pane here
+                // — it now lives at the top of ParkingMetricsPanel's BEV
+                // section instead, so the video player (left) is free to
+                // use the space this pane used to take.
                 ParkingMetricsPanel(analysis: analysis, selectedVehicleID: selectedVehicleID)
             }
         }
@@ -95,22 +117,42 @@ struct ParkingVideoReviewView: View {
             guard let analysisID = analysis?.id else { return }
             Task { await model.selectParkingVehicle(sessionID: session.id, analysisID: analysisID, vehicleID: newValue) }
         }
+        .onDisappear {
+            if let player, let timeObserverToken {
+                player.removeTimeObserver(timeObserverToken)
+            }
+        }
     }
 
     @ViewBuilder
     private var videoArea: some View {
-        if let player {
-            AVPlayerContainerView(player: player)
-                .aspectRatio(16.0 / 9.0, contentMode: .fit)
-        } else if isLoadingVideo {
-            ProgressView("Memuat video…")
-                .frame(maxWidth: .infinity)
-                .aspectRatio(16.0 / 9.0, contentMode: .fit)
-        } else {
-            ContentUnavailableView("Video tidak tersedia", systemImage: "video.slash",
-                                   description: Text("Berkas video sumber untuk sesi ini tidak ditemukan."))
-                .aspectRatio(16.0 / 9.0, contentMode: .fit)
+        GeometryReader { geo in
+            ZStack(alignment: .topLeading) {
+                if let player {
+                    AVPlayerContainerView(player: player)
+                        .frame(width: geo.size.width, height: geo.size.height)
+                } else if isLoadingVideo {
+                    ProgressView("Memuat video…")
+                        .frame(width: geo.size.width, height: geo.size.height)
+                } else {
+                    ContentUnavailableView("Video tidak tersedia", systemImage: "video.slash",
+                                           description: Text("Berkas video sumber untuk sesi ini tidak ditemukan."))
+                        .frame(width: geo.size.width, height: geo.size.height)
+                }
+
+                if isNearSelectedTimestamp, let analysis, let selectedVehicle {
+                    let rect = ParkingMetrics.normalizedRect(for: selectedVehicle, imageWidth: analysis.imageWidth,
+                                                             imageHeight: analysis.imageHeight)
+                    if rect.width > 0, rect.height > 0 {
+                        DetectedVehicleOverlay(vehicle: selectedVehicle)
+                            .frame(width: rect.width * geo.size.width, height: rect.height * geo.size.height)
+                            .position(x: (rect.minX + rect.width / 2) * geo.size.width,
+                                     y: (rect.minY + rect.height / 2) * geo.size.height)
+                    }
+                }
+            }
         }
+        .aspectRatio(videoAspectRatio, contentMode: .fit)
     }
 
     private func loadPlayer() async {
@@ -122,11 +164,39 @@ struct ParkingVideoReviewView: View {
         player = newPlayer
         isLoadingVideo = false
         seekToSelectedAnalysis()
+
+        timeObserverToken = newPlayer.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.25, preferredTimescale: 600), queue: .main) { time in
+            guard let target = self.analysis?.sessionRelativeSeconds else {
+                self.isNearSelectedTimestamp = false
+                return
+            }
+            self.isNearSelectedTimestamp = abs(time.seconds - target) < 0.5
+        }
     }
 
     private func seekToSelectedAnalysis() {
         guard let player, let seconds = analysis?.sessionRelativeSeconds else { return }
         player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+}
+
+/// The flagged vehicle's box, drawn directly on the video instead of a
+/// separate still-frame canvas (the old `VehicleCandidatesCanvasView`,
+/// removed once nothing referenced it anymore) — view-only (no tap/
+/// selection, no number tag), magenta for "this is the current selection,"
+/// the same color language that view used for the same concept.
+private struct DetectedVehicleOverlay: View {
+    let vehicle: VehicleSummary
+
+    private var color: Color { Color(red: 1.0, green: 0, blue: 0.78) }
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 4)
+                .stroke(color, lineWidth: 2.5)
+        }
+        .shadow(color: color.opacity(0.6), radius: 8)
+        .allowsHitTesting(false)
     }
 }
 

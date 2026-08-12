@@ -248,12 +248,18 @@ public struct VehicleSummary: Codable, Sendable {
     /// small patch on a wide one can have the same area but very different
     /// real-world consequences; this captures the one area alone doesn't.
     public let widthMaxPct: Double?
+    /// The road's own absolute width in meters at that same worst
+    /// cross-section (`width_road_m_at_max` — what `widthMaxPct` is a
+    /// percentage of), not this vehicle's own physical width, which the
+    /// worker doesn't compute at all.
+    public let roadWidthM: Double?
 
     enum CodingKeys: String, CodingKey {
         case id, label, score, source, selectable, bbox
         case areaM2 = "area_m2"
         case areaM2Raw = "area_m2_raw"
         case widthMaxPct = "width_max_pct"
+        case roadWidthM = "width_road_m_at_max"
     }
 
     /// Image-space pixel bbox `[u0, v0, u1, v1]` (exclusive upper) as a CGRect.

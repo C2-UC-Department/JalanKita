@@ -69,7 +69,6 @@ private struct CandidateRow: View {
         if let seconds = analysis.sessionRelativeSeconds {
             parts.append(ParkingTimelineView.formattedTimestamp(seconds))
         }
-        parts.append("\(analysis.rankedVehicles.count) kendaraan terukur")
         if let candidate = analysis.carCandidate {
             parts.append(candidate.stopClass)
             parts.append("depth: \(candidate.depthReading)")

@@ -2,12 +2,20 @@
 //  ParkingMetricsPanel.swift
 //  JalanKita Mac
 //
-//  Right pane of Tinjauan Parkir: the "2 · Measured disturbance" stage of
-//  app.py's Streamlit workflow, ported almost directly — 5 StatTiles (the
-//  same component SessionInboxView's statRow already uses), the re-rendered
-//  BEV image (magenta highlight follows `selectedVehicleID` via
-//  AppModel.selectParkingVehicle), and a ranked Table of every vehicle
-//  mirroring app.py's `st.dataframe`.
+//  Right pane of Tinjauan Parkir: just the three stats that matter for a
+//  human reviewer, sitting above the re-rendered BEV image (magenta
+//  highlight follows `selectedVehicleID` via AppModel.selectParkingVehicle).
+//  The detected-vehicle frame itself now draws directly on the video player
+//  (`ParkingVideoReviewView`), not here. The full ranked-vehicle table and
+//  the raw/uncalibrated stats were dropped: with the pipeline (not a
+//  manual tap) already deciding which vehicle is the flagged one, a table
+//  of every OFRSNet occluder had nothing left to do.
+//
+//  A vehicle's own physical width in meters isn't one of these three —
+//  the Python worker (src/disturbance.py) never computes it at all, only
+//  road width (`width_road_m_at_max`, "LEBAR JALAN" below) and the road's
+//  blocked-width percentage. Adding a real vehicle-width figure would be a
+//  pipeline change, not a UI one.
 //
 
 import SwiftUI
@@ -23,16 +31,11 @@ struct ParkingMetricsPanel: View {
         analysis.summary.vehicles.first { $0.id == selectedVehicleID }
     }
 
-    private var zeroAreaCount: Int {
-        analysis.summary.vehicles.count - analysis.rankedVehicles.count
-    }
-
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 statGrid
                 bevSection
-                tableSection
 
                 Text(scaleCaption)
                     .font(.caption2)
@@ -44,43 +47,6 @@ struct ParkingMetricsPanel: View {
         .task(id: analysis.bevPNGPath) {
             bevImage = analysis.bevPNGPath.flatMap { NSImage(contentsOfFile: $0) }
         }
-    }
-
-    // MARK: - Stat tiles
-
-    private var statGrid: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            SectionLabel(text: "TERUKUR")
-            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 18) {
-                StatTile(
-                    title: selectedVehicle == nil ? "TERPILIH" : "#\(selectedVehicle!.id) JALAN TERTUTUP",
-                    value: formatted(selectedVehicle?.areaM2), unit: "m²",
-                    detail: "Jalan yang disembunyikan kendaraan ini, dikalibrasi dengan prior tinggi kamera.",
-                    accent: .accentColor
-                )
-                StatTile(
-                    title: "BAGIAN JALAN AMODAL", value: formatted(percentShare), unit: "%",
-                    detail: "Kebal terhadap skala — angka paling bisa dipercaya."
-                )
-                StatTile(
-                    title: "SEMUA PENGHALANG", value: formatted(analysis.summary.total.occludedRoadM2), unit: "m²",
-                    detail: "\(formatted(analysis.summary.total.occludedPct))% dari jalan amodal"
-                )
-                StatTile(
-                    title: "TANPA KALIBRASI", value: formatted(selectedVehicle?.areaM2Raw), unit: "m²",
-                    detail: "Skala depth monokuler mentah, belum dikoreksi tinggi kamera."
-                )
-                StatTile(
-                    title: "LEBAR MAKS TERBLOKIR", value: formatted(selectedVehicle?.widthMaxPct), unit: "%",
-                    detail: "Bagian terlebar jalan yang terblokir di satu potongan melintang terburuknya."
-                )
-            }
-        }
-    }
-
-    private var percentShare: Double? {
-        ParkingMetrics.percentOfSurface(area: selectedVehicle?.areaM2,
-                                        ofTotal: analysis.summary.total.amodalRoadM2)
     }
 
     // MARK: - BEV
@@ -105,51 +71,26 @@ struct ParkingMetricsPanel: View {
         }
     }
 
-    // MARK: - Ranked table
+    // MARK: - Stat tiles
 
-    private struct VehicleRow: Identifiable {
-        let id: Int
-        let label: String
-        let score: String
-        let source: String
-        let areaM2: String
-        let areaM2Raw: String
-        let widthMaxPct: String
-    }
-
-    private var tableRows: [VehicleRow] {
-        analysis.rankedVehicles.map { v in
-            VehicleRow(
-                id: v.id, label: ParkingMetrics.label(for: v.label),
-                score: v.score.map { String(format: "%.2f", $0) } ?? "blob",
-                source: v.source,
-                areaM2: formatted(v.areaM2), areaM2Raw: formatted(v.areaM2Raw),
-                widthMaxPct: formatted(v.widthMaxPct)
-            )
-        }
-    }
-
-    private var tableSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            SectionLabel(text: "SEMUA KENDARAAN")
-            Table(tableRows) {
-                TableColumn("#") { row in Text("\(row.id)").font(.data(12)) }.width(28)
-                TableColumn("Label") { row in Text(row.label).font(.system(size: 12)) }.width(72)
-                TableColumn("Skor") { row in Text(row.score).font(.data(12)).foregroundStyle(.secondary) }.width(48)
-                TableColumn("Jalan m²") { row in Text(row.areaM2).font(.data(12, weight: .semibold)) }.width(70)
-                TableColumn("Tanpa kalibrasi") { row in Text(row.areaM2Raw).font(.data(12)).foregroundStyle(.secondary) }.width(96)
-                TableColumn("Lebar maks %") { row in Text(row.widthMaxPct).font(.data(12)) }.width(88)
+    private var statGrid: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionLabel(text: "TERUKUR")
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 18) {
+                StatTile(
+                    title: "JALAN TERTUTUP OLEH MOBIL", value: formatted(selectedVehicle?.areaM2), unit: "m²",
+                    detail: "Jalan yang disembunyikan kendaraan ini, dikalibrasi dengan prior tinggi kamera.",
+                    accent: .accentColor
+                )
+                StatTile(
+                    title: "LEBAR JALAN TERBLOKIR", value: formatted(selectedVehicle?.widthMaxPct), unit: "%",
+                    detail: "Bagian terlebar jalan yang terblokir di satu potongan melintang terburuknya."
+                )
+                StatTile(
+                    title: "LEBAR JALAN", value: formatted(selectedVehicle?.roadWidthM, decimals: 2), unit: "m",
+                    detail: "Lebar jalan sebenarnya di potongan melintang terburuk kendaraan ini."
+                )
             }
-            .frame(minHeight: 200, idealHeight: 260)
-
-            VStack(alignment: .leading, spacing: 2) {
-                if zeroAreaCount > 0 {
-                    Text("+ \(zeroAreaCount) penghalang lain tanpa jalan terukur")
-                }
-                Text("tak teratribusi: \(formatted(analysis.summary.unattributed.areaM2)) m²")
-            }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
         }
     }
 
