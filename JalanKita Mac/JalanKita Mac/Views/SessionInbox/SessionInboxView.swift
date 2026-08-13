@@ -27,9 +27,10 @@ struct SessionInboxView: View {
     @State private var pendingDeletionID: Session.ID?
 
     private var filteredSessions: [Session] {
+        let visible = model.sessions.filter { $0.status != .done }
         let base = searchText.isEmpty
-            ? model.sessions
-            : model.sessions.filter {
+            ? visible
+            : visible.filter {
                 $0.roadName.localizedCaseInsensitiveContains(searchText) ||
                 $0.surveyor.name.localizedCaseInsensitiveContains(searchText)
             }
@@ -184,14 +185,13 @@ struct SessionInboxView: View {
             HStack(spacing: 0) {
                 StatTile(title: "MENUNGGU DIPROSES", value: "\(model.newSessionsCount)", unit: "sesi")
                 Divider()
-                StatTile(title: "TOTAL SESI", value: "\(model.sessions.count)", unit: nil,
+                StatTile(title: "TOTAL SESI", value: "\(model.pendingSessionsCount)", unit: nil,
                          detail: "\(model.surveyorCount) surveyor")
                 Divider()
-                StatTile(title: "JARAK TERSURVEI", value: formattedGB(model.totalDistanceKm), unit: "km",
-                         detail: "\(model.doneSessionsCount) sesi selesai")
+                StatTile(title: "PERLU PERHATIAN", value: "\(model.attentionNeededCount)", unit: nil,
+                         detail: "terdegradasi/gagal", accent: Severity.urgent.literalColor)
                 Divider()
-                StatTile(title: "PARKIR MENGGANGGU", value: "\(model.disturbanceCount)", unit: nil,
-                         detail: "kendaraan terdeteksi", accent: Severity.urgent.literalColor)
+                StatTile(title: "UKURAN TOTAL", value: formattedGB(model.pendingSizeGB), unit: "GB")
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 14)

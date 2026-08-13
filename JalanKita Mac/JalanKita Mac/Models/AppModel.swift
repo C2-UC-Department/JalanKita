@@ -210,6 +210,28 @@ final class AppModel {
         sessions.filter { $0.status == .done }.count
     }
 
+    /// Finished sessions — the population `ReportsView` ("Laporan") lists.
+    var doneSessions: [Session] {
+        sessions.filter { $0.status == .done }
+    }
+
+    var pendingSessionsCount: Int {
+        sessions.count - doneSessionsCount
+    }
+
+    var attentionNeededCount: Int {
+        sessions.filter {
+            switch $0.status {
+            case .degraded, .failed: return true
+            default: return false
+            }
+        }.count
+    }
+
+    var pendingSizeGB: Double {
+        sessions.filter { $0.status != .done }.reduce(0) { $0 + $1.sizeGB }
+    }
+
     var totalVehiclesAnalyzed: Int {
         parkingAnalyses.values.reduce(0) { $0 + $1.count }
     }

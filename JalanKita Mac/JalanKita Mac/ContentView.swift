@@ -78,9 +78,11 @@ struct ContentView: View {
             ReviewFindingsView(model: model)
         case .mapSegments:
             MapSegmentsView(model: model)
+        case .reports:
+            ReportsView(model: model)
         case .cloudSync:
             CloudSyncSettingsView(model: model)
-        case .reports, .surveyors, .calibration:
+        case .surveyors, .calibration:
             ContentUnavailableView(
                 model.selection.title,
                 systemImage: model.selection.symbolName,
