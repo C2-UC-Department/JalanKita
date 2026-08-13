@@ -48,6 +48,7 @@ from ultralytics import YOLO
 
 import demo_scan_v5 as v5
 from foe_signal import estimate_foe_and_static_flow, car_flow_points, car_foe_probability
+import foe_signal as _foe_mod  # for the --frame-stride FOE_RANSAC_INLIER_THRESHOLD_PX rescale, see main()
 from road_completion import encroachment_ratio_v7
 from demo_scan_v6 import (
     classify_from_history, combine_states,
@@ -60,7 +61,7 @@ from demo_scan_v6 import (
 from demo_scan_v8 import neighbor_stop_ratio, NEIGHBOR_ROW_BAND_PX, NEIGHBOR_RATIO_TRAFFIC_THRESHOLD, \
     RESUMPTION_DEBOUNCE_SECONDS, MIN_EXTRA_STATIONARY_SECONDS_FOR_PARKED
 from coverage_zone import mask_max_width_span, point_in_zone, sign_coverage_zone
-from sign_tracker import SIGN_MIN_VOTES_TO_TRUST, SignTracker
+from sign_tracker import SIGN_MIN_VOTES_TO_TRUST, SIGN_TRACK_MAX_MISSED, SignTracker
 
 from probe_depth_rate import (
     LK_PARAMS, BG_MAX_CORNERS, BG_QUALITY, BG_MIN_DISTANCE,
@@ -101,6 +102,29 @@ def apply_determinism_settings():
     torch.manual_seed(DETERMINISM_SEED)
     torch.set_num_threads(1)
     os.environ["PYTHONHASHSEED"] = str(DETERMINISM_SEED)
+
+
+# --- --frame-stride scaling helpers -----------------------------------------------------------
+# All the epi/FoE/sign-tracker/depth constants below were tuned assuming one native video frame of
+# elapsed time between consecutive processed samples. With --frame-stride > 1, only every Nth
+# native frame is actually run through the heavy models (see main()'s loop), so real elapsed time
+# and real pixel motion between consecutive PROCESSED samples both grow by ~stride. These are
+# first-pass estimates, not derivations -- validated against this project's own ground-truth clips
+# (see docs), not assumed correct by construction. At stride=1 every one of these is a no-op.
+def _scale_px(base, stride):
+    """Family C: px/spatial thresholds -- real inter-sample motion grows ~linearly with stride."""
+    return base * stride
+
+
+def _scale_window(base, stride):
+    """Family D: frame-count windows meant to span a fixed real-world duration."""
+    return max(1, round(base / stride))
+
+
+def _scale_ema_alpha(alpha, stride):
+    """GROUND_POINT_EMA_ALPHA is a decay rate, not a frame count -- naive division is dimensionally
+    wrong. Compound the per-native-frame decay so the real-time smoothing envelope is preserved."""
+    return 1.0 - (1.0 - alpha) ** stride
 
 
 def box_iou(a, b):
@@ -161,7 +185,16 @@ def main():
                          help="Where demo_screenshots.py writes its output (default: "
                               "demo/screenshots/<video>/ inside this repo). JalanKita Mac passes "
                               "its own session working directory here.")
+    parser.add_argument("--frame-stride", type=int, default=1,
+                         help="Process only every Nth native video frame (default 1: every frame, "
+                              "identical to pre-existing behavior). CLI-only research flag -- "
+                              "JalanKita Mac never passes this. N=1 is a structural no-op for every "
+                              "constant this flag touches; N>1 is unvalidated against ByteTrack's "
+                              "and the sign tracker's own IoU/Kalman association, which cannot be "
+                              "fixed by rescaling constants -- see docs/ for the validation clips.")
     args = parser.parse_args()
+    if args.frame_stride < 1:
+        parser.error("--frame-stride must be >= 1")
 
     if args.deterministic:
         apply_determinism_settings()
@@ -176,10 +209,17 @@ def main():
     else:
         load_fn, map_fn = load_depth_pipeline, depth_map
 
+    # --frame-stride depth rescale, after the MiDaS-backend swap above so it applies to whichever
+    # backend's base value just won (no-op at stride=1).
+    _rdv.MIN_FRAMES_PER_TRACK = _scale_window(_rdv.MIN_FRAMES_PER_TRACK, args.frame_stride)
+    _rdv.UNSTABLE_EGO_RATE = _scale_px(_rdv.UNSTABLE_EGO_RATE, args.frame_stride)
+
     car_model = YOLO(args.model)
     custom_model = YOLO(args.custom_model)
     road_segmenter = v5.RoadSegmenter(torch.device(args.device))
-    sign_tracker = SignTracker()
+    # max_missed scaled here (before fps/width/height are known below) since SignTracker only
+    # needs the stride itself, already parsed -- see the _scale_window family below for the rest.
+    sign_tracker = SignTracker(max_missed=_scale_window(SIGN_TRACK_MAX_MISSED, args.frame_stride))
     dpipe = load_fn(args.device if args.depth_backend == "depth-anything" else "cpu")
 
     cap = cv2.VideoCapture(args.input)
@@ -189,12 +229,42 @@ def main():
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    total_frames_expected = max(1, -(-total_frames // args.frame_stride))  # ceil div, for progress display only
 
-    flag_after_frames = max(1, int(round(v5.FLAG_AFTER_SECONDS * fps)))
-    stationary_debounce_frames = max(1, int(round(STATIONARY_DEBOUNCE_SECONDS * fps)))
-    resumption_debounce_frames = max(1, int(round(RESUMPTION_DEBOUNCE_SECONDS * fps)))
+    # --deterministic forces device=cpu above; --frame-stride only ever passed by hand from the
+    # CLI (see the flag's own help text) -- effective_fps is what should feed every SECONDS-based
+    # frame-count threshold below, since fewer frames are now processed per real second of video.
+    effective_fps = fps / args.frame_stride
+    flag_after_frames = max(1, int(round(v5.FLAG_AFTER_SECONDS * effective_fps)))
+    stationary_debounce_frames = max(1, int(round(STATIONARY_DEBOUNCE_SECONDS * effective_fps)))
+    resumption_debounce_frames = max(1, int(round(RESUMPTION_DEBOUNCE_SECONDS * effective_fps)))
+    dispute_frames = max(1, int(round(DISPUTE_SECONDS * effective_fps)))
+
+    # --- family C/D constant rescaling for --frame-stride (no-op at stride=1) ---
+    # Module-qualified constants (v5.X, _rdv.X) are live attribute lookups everywhere they're used
+    # in lib/demo_scan_v5.py and depth/render_depth_video.py, so reassigning them here propagates
+    # automatically -- same idiom already used for the MiDaS threshold swap below. Bare-name
+    # imports (FOE_*, imported at the top of this file) are one-time value copies and must be
+    # reassigned as local names instead; reassigning demo_scan_v6.FOE_* would do nothing.
+    v5.RESIDUAL_ENTER_STATIONARY_PX = _scale_px(v5.RESIDUAL_ENTER_STATIONARY_PX, args.frame_stride)
+    v5.RESIDUAL_EXIT_STATIONARY_PX = _scale_px(v5.RESIDUAL_EXIT_STATIONARY_PX, args.frame_stride)
+    v5.FUNDAMENTAL_RANSAC_THRESHOLD_PX = _scale_px(v5.FUNDAMENTAL_RANSAC_THRESHOLD_PX, args.frame_stride)
+    v5.RESIDUAL_SMOOTHING_WINDOW = _scale_window(v5.RESIDUAL_SMOOTHING_WINDOW, args.frame_stride)
+    v5.MIN_HISTORY_FOR_CONFIDENCE = _scale_window(v5.MIN_HISTORY_FOR_CONFIDENCE, args.frame_stride)
+    v5.GROUND_POINT_EMA_ALPHA = _scale_ema_alpha(v5.GROUND_POINT_EMA_ALPHA, args.frame_stride)
+
+    _foe_mod.FOE_RANSAC_INLIER_THRESHOLD_PX = _scale_px(_foe_mod.FOE_RANSAC_INLIER_THRESHOLD_PX, args.frame_stride)
+
+    global FOE_ENTER_STATIONARY, FOE_EXIT_STATIONARY, FOE_MAX_JUMP_FRACTION_OF_DIAGONAL
+    global FOE_SMOOTHING_WINDOW, FOE_MIN_HISTORY_FOR_CONFIDENCE, FOE_JITTER_WINDOW
+    FOE_ENTER_STATIONARY = _scale_px(FOE_ENTER_STATIONARY, args.frame_stride)
+    FOE_EXIT_STATIONARY = _scale_px(FOE_EXIT_STATIONARY, args.frame_stride)
+    FOE_MAX_JUMP_FRACTION_OF_DIAGONAL = _scale_px(FOE_MAX_JUMP_FRACTION_OF_DIAGONAL, args.frame_stride)
+    FOE_SMOOTHING_WINDOW = _scale_window(FOE_SMOOTHING_WINDOW, args.frame_stride)
+    FOE_MIN_HISTORY_FOR_CONFIDENCE = _scale_window(FOE_MIN_HISTORY_FOR_CONFIDENCE, args.frame_stride)
+    FOE_JITTER_WINDOW = _scale_window(FOE_JITTER_WINDOW, args.frame_stride)
+
     foe_max_jump_px = FOE_MAX_JUMP_FRACTION_OF_DIAGONAL * float(np.hypot(width, height))
-    dispute_frames = max(1, int(round(DISPUTE_SECONDS * fps)))
 
     prev_gray = None
     ground_point_history = {}
@@ -267,11 +337,27 @@ def main():
     # last_frame are both known, rather than only ever having the first frame's box on hand.
     track_frame_boxes = defaultdict(list)
 
+    # frame_idx stays "the Nth PROCESSED frame" (unchanged meaning from before --frame-stride
+    # existed) -- this is what keeps the `contiguous = prev_gp_entry[0] == frame_idx - 1` check
+    # further below working with zero changes, since consecutive PROCESSED frames are still
+    # index-adjacent in this space. native_idx is the true native video frame counter, used only
+    # to decide which frames to skip; native_frame_number[frame_idx] records the native index a
+    # given processed frame actually came from, for every seconds/timestamp DISPLAY calculation
+    # below (those must reflect true elapsed time, not processed-frame count).
     frame_idx = 0
+    native_idx = 0
+    native_frame_number = []
     while True:
         ret, frame = cap.read()
         if not ret:
             break
+
+        if args.frame_stride > 1 and (native_idx % args.frame_stride) != 0:
+            native_idx += 1
+            continue
+
+        native_frame_number.append(native_idx)
+        native_idx += 1
 
         placed_label_rects = []
 
@@ -648,10 +734,10 @@ def main():
                 "ground_point": (int(gx), int(gy)),
             })
 
-        timestamp_s = frame_idx / fps
-        cv2.putText(frame, f"t={timestamp_s:5.1f}s  frame {frame_idx}/{total_frames}", (10, 25),
+        timestamp_s = native_frame_number[frame_idx] / fps
+        cv2.putText(frame, f"t={timestamp_s:5.1f}s  frame {frame_idx}/{total_frames_expected}", (10, 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
-        cv2.putText(frame, f"t={timestamp_s:5.1f}s  frame {frame_idx}/{total_frames}", (10, 25),
+        cv2.putText(frame, f"t={timestamp_s:5.1f}s  frame {frame_idx}/{total_frames_expected}", (10, 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
         draw_legend(frame)
 
@@ -661,8 +747,8 @@ def main():
 
         prev_gray, prev_depth, prev_scale, prev_any_mover = gray, depth, dscale, all_moving_objects_mask
         frame_idx += 1
-        if frame_idx % 50 == 0 or frame_idx == total_frames:
-            print(f"  processed {frame_idx}/{total_frames} frames", file=sys.stderr)
+        if frame_idx % 50 == 0 or frame_idx == total_frames_expected:
+            print(f"  processed {frame_idx}/{total_frames_expected} frames", file=sys.stderr)
 
     cap.release()
     sign_tracker.finalize_all()
@@ -690,7 +776,10 @@ def main():
     print(f"\ndepth backend: {args.depth_backend}  ({len(depth_stats)} track(s) measured, "
           f"static ROI covers {int(static_roi.sum())} px)", file=sys.stderr)
 
-    writer = cv2.VideoWriter(args.output, cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
+    # effective_fps (not native fps): at stride>1 there are fewer output frames than the source
+    # had, so writing at native fps would play the annotated video back in 1/stride the real
+    # duration -- effective_fps keeps its wall-clock length matched to the source clip instead.
+    writer = cv2.VideoWriter(args.output, cv2.VideoWriter_fourcc(*"mp4v"), effective_fps, (width, height))
     for f_idx in range(frame_idx):
         raw = frame_cache.get(f_idx)
         if raw is None:
@@ -716,7 +805,7 @@ def main():
 
     print(f"\n{len(sign_tracker.finalized)} sign/crosswalk track(s):")
     for t in sorted(sign_tracker.finalized, key=lambda t: t.first_frame):
-        span_s = f"{t.first_frame/fps:.1f}s-{t.last_frame/fps:.1f}s"
+        span_s = f"{native_frame_number[t.first_frame]/fps:.1f}s-{native_frame_number[t.last_frame]/fps:.1f}s"
         trusted = "CONFIRMED" if t.total_votes >= SIGN_MIN_VOTES_TO_TRUST else "low-confidence/noise"
         print(f"  track#{t.id}: {span_s} ({t.last_frame-t.first_frame+1} frames seen), "
               f"votes={dict(t.votes)}, resolved={t.resolved_class} [{trusted}]")
@@ -732,8 +821,8 @@ def main():
     for track_id, stats in sorted(track_stats.items()):
         if track_id in excluded_ids:
             continue
-        first_s = stats["first_frame"] / fps
-        last_s = stats["last_frame"] / fps
+        first_s = native_frame_number[stats["first_frame"]] / fps
+        last_s = native_frame_number[stats["last_frame"]] / fps
         n = stats["frames_seen"]
         pct_stationary = 100 * stats["frames_stationary"] / n if n else 0
         sev = severity_samples.get(track_id)
@@ -745,7 +834,7 @@ def main():
         if ever_flagged[track_id]:
             n_samples = neighbor_ratio_samples.get(track_id)
             mean_n_ratio = np.mean(n_samples) if n_samples else None
-            min_stationary_frames_for_parked = flag_after_frames + int(round(MIN_EXTRA_STATIONARY_SECONDS_FOR_PARKED * fps))
+            min_stationary_frames_for_parked = flag_after_frames + int(round(MIN_EXTRA_STATIONARY_SECONDS_FOR_PARKED * effective_fps))
             observed_long_enough = stats["frames_stationary"] >= min_stationary_frames_for_parked
 
             ds = depth_stats.get(track_id)
@@ -790,8 +879,10 @@ def main():
                 track_frame_boxes[track_id], key=lambda fb: abs(fb[0] - target_frame)
             )
             candidate_frame_box[track_id] = mid_box
+            # mid_frame_idx itself stays processed-space (it indexes frame_cache/pristine_frame_cache,
+            # both keyed by processed frame_idx) -- only the seconds value needs the true native time.
             demo_candidates.append((track_id, stop_class, ever_flagged_in_zone[track_id], depth_txt,
-                                    mid_frame_idx, mid_frame_idx / fps))
+                                    mid_frame_idx, native_frame_number[mid_frame_idx] / fps))
 
         print(
             f"  car#{track_id}: seen {n} frames ({first_s:.1f}s - {last_s:.1f}s), "

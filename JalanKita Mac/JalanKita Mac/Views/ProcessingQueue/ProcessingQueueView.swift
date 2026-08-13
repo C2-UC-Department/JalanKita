@@ -38,7 +38,7 @@ struct ProcessingQueueView: View {
             // opaque background. `.inset` is the correct style for a
             // regular in-pane list and doesn't carry that vibrancy at all.
             List(queue, selection: $selection) { session in
-                QueueRow(session: session)
+                QueueRow(session: session, model: model)
             }
             .listStyle(.inset)
             .safeAreaInset(edge: .bottom) {
@@ -140,9 +140,13 @@ struct ProcessingQueueView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                HStack(spacing: 24) {
-                    progressStat("KEMAJUAN", progressText(for: session), color: .accentColor)
-                    Spacer()
+                // Wrapped in a TimelineView so "berjalan 3 mnt 12 dtk" actually
+                // counts up. The alternative — a @State Date driven by a Timer —
+                // would keep ticking while this screen isn't even visible, and
+                // has to be torn down by hand; TimelineView is scheduled by the
+                // framework and stops on its own when the view goes away.
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    timingSection(for: session, now: context.date)
                 }
 
                 if steps(for: session).isEmpty {
@@ -162,6 +166,67 @@ struct ProcessingQueueView: View {
             }
             .padding(24)
         }
+    }
+
+    /// The "sudah berapa lama / masih berapa lama / jangan-jangan macet" block.
+    @ViewBuilder
+    private func timingSection(for session: Session, now: Date) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 24) {
+                progressStat("KEMAJUAN", progressText(for: session), color: .accentColor)
+
+                if let elapsed = model.elapsed(for: session.id, now: now) {
+                    progressStat("BERJALAN", formatDuration(elapsed), color: .primary)
+                }
+
+                // Absent until the worker has reported real frame progress —
+                // `estimatedRemaining` returns nil rather than projecting from
+                // the model-loading phase, so this reads "menghitung…" instead
+                // of showing a number that would only be wrong.
+                if model.elapsed(for: session.id, now: now) != nil {
+                    if let remaining = model.estimatedRemaining(for: session.id, now: now) {
+                        progressStat("PERKIRAAN SISA", formatDuration(remaining), color: .primary)
+                    } else {
+                        progressStat("PERKIRAAN SISA", "menghitung…", color: .secondary)
+                    }
+                }
+
+                Spacer()
+            }
+
+            if model.isStalled(session.id, now: now), let silent = model.silentFor(session.id, now: now) {
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Belum ada kabar dari worker selama \(formatDuration(silent)).")
+                            .font(.callout.weight(.semibold))
+                        Text("Normalnya worker melapor tiap ~40 detik, dengan jeda sunyi ~80 detik "
+                             + "di awal saat memuat model. Selebih dari itu kemungkinan macet — "
+                             + "cek log di bawah.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+            }
+        }
+    }
+
+    /// Coarse, human-readable duration: the operator wants "kira-kira berapa
+    /// lama", not centisecond precision, and a monospaced-digit stat tile that
+    /// changes width every tick is harder to read than one that doesn't.
+    private func formatDuration(_ interval: TimeInterval) -> String {
+        let total = Int(interval.rounded())
+        let hours = total / 3600
+        let minutes = (total % 3600) / 60
+        let seconds = total % 60
+        if hours > 0 { return "\(hours) jam \(minutes) mnt" }
+        if minutes > 0 { return "\(minutes) mnt \(seconds) dtk" }
+        return "\(seconds) dtk"
     }
 
     private func steps(for session: Session) -> [PipelineStep] {

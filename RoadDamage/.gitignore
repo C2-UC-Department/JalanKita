@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.pyc
+
+# Run outputs. CarDetection/.gitignore lacks an equivalent rule and has had run
+# artifacts committed by accident twice (PROGRESS.md gap 8) — this is that lesson,
+# applied up front rather than after the fact.
+outputs/
+*.jpg
+*.png
+
+# PyInstaller output from build_worker.sh. Multiple GB — the same lesson again,
+# ahead of the first build rather than after someone commits one.
+build/
+dist/
+
+# Note what is deliberately NOT ignored: *.pt. models/server_trained.pt is
+# tracked on purpose (19.2 MB, locally fine-tuned, no public URL to download it
+# from) and the worker hard-errors without it.

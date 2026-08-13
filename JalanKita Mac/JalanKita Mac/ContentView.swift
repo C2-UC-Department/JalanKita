@@ -31,6 +31,7 @@
 //
 
 import SwiftUI
+import Combine
 import JalanKitaKit
 
 struct ContentView: View {
@@ -57,14 +58,17 @@ struct ContentView: View {
             }
         }
         .navigationSplitViewStyle(.balanced)
-        // `preferredColorScheme` drives the whole window's NSAppearance on
-        // macOS, not just the subtree it's attached to — setting it deep
-        // inside ReviewFindingsView left the sidebar and the review pane
-        // arguing over two different appearances in the same window,
-        // which is what caused sidebar rows to render clipped on that
-        // screen. Forcing it once, here, at the window root keeps sidebar
-        // and content consistently in the same appearance.
-        .preferredColorScheme(model.selection == .review ? .dark : nil)
+        // Reap the warm inference worker on quit. Without this the child Python
+        // process outlives the app — the problem CLAUDE.md fact 14 records.
+        // This used to reap the road-damage worker (Peninjauan); with that
+        // vertical removed, the same hook now serves InferenceService, whose
+        // `shutdown()` existed all along but had no caller.
+        // `willTerminate` rather than `.onDisappear`, which doesn't fire reliably
+        // on app quit, only on the window going away.
+        .onReceive(NotificationCenter.default.publisher(
+            for: NSApplication.willTerminateNotification)) { _ in
+            Task { await model.shutdownServices() }
+        }
     }
 
     @ViewBuilder
@@ -74,8 +78,6 @@ struct ContentView: View {
             SessionInboxView(model: model)
         case .queue:
             ProcessingQueueView(model: model)
-        case .review:
-            ReviewFindingsView(model: model)
         case .mapSegments:
             MapSegmentsView(model: model)
         case .reports:

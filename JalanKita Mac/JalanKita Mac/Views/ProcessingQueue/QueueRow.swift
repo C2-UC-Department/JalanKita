@@ -18,6 +18,7 @@ import JalanKitaKit
 
 struct QueueRow: View {
     let session: Session
+    var model: AppModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -36,9 +37,19 @@ struct QueueRow: View {
             switch session.status {
             case .segmenting(let progress):
                 ProgressView(value: progress)
-                Text("Segmentasi · \(Int(progress * 100))%")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(Color.accentColor)
+                // Only the status line ticks, not the whole List. Wrapping the
+                // List itself in a TimelineView would re-render its structure
+                // every second, which is how selection and scroll position get
+                // disturbed; each row driving its own clock keeps the churn to
+                // the one line that actually changes.
+                //
+                // It has to tick at all because a stall is defined by the
+                // ABSENCE of worker output: with no heartbeat there is no model
+                // mutation, so nothing would ever prompt a redraw and the
+                // warning would never appear.
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    statusLine(progress: progress, now: context.date)
+                }
             default:
                 Text("Menunggu")
                     .font(.caption)
@@ -46,6 +57,34 @@ struct QueueRow: View {
             }
         }
         .padding(.vertical, 4)
+    }
+
+    @ViewBuilder
+    private func statusLine(progress: Double, now: Date) -> some View {
+        if model.isStalled(session.id, now: now) {
+            HStack(spacing: 4) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                Text("Mungkin macet · \(Int(progress * 100))%")
+            }
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.orange)
+        } else if let elapsed = model.elapsed(for: session.id, now: now) {
+            Text("Segmentasi · \(Int(progress * 100))% · \(compact(elapsed))")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Color.accentColor)
+        } else {
+            Text("Segmentasi · \(Int(progress * 100))%")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Color.accentColor)
+        }
+    }
+
+    /// Short form for the list — the detail pane carries the readable one.
+    private func compact(_ interval: TimeInterval) -> String {
+        let total = Int(interval.rounded())
+        if total >= 3600 { return "\(total / 3600)j \((total % 3600) / 60)m" }
+        if total >= 60 { return "\(total / 60)m \(total % 60)d" }
+        return "\(total)d"
     }
 
     private var isRunning: Bool {

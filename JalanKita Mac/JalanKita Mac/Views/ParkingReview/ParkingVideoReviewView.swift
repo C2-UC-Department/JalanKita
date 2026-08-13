@@ -31,6 +31,13 @@
 //  is the much older, plain-AppKit class the overlay itself ultimately wraps,
 //  and doesn't go through whatever's failing there.
 //
+//  Since road damage became stage 3 of this pipeline, this screen shows BOTH
+//  verticals against one video. They share the player, the timeline axis and the
+//  playhead-proximity rule, and nothing else — separate selections, separate
+//  strips, separate right-hand panes, switched by `mode`. The alternative, one
+//  merged list, would have had to invent an ordering across two things measured at
+//  different frames for different reasons.
+//
 
 import AppKit
 import AVKit
@@ -41,15 +48,41 @@ struct ParkingVideoReviewView: View {
     let session: Session
     var model: AppModel
 
+    /// Which vertical the strip, the overlay and the right-hand pane are showing.
+    /// Both timelines stay visible in either mode — seeing that a damaged stretch
+    /// and a blocked stretch coincide is worth more than the vertical space.
+    private enum ReviewMode: String, CaseIterable, Identifiable {
+        case parkir, kerusakan
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .parkir: "Parkir"
+            case .kerusakan: "Kerusakan jalan"
+            }
+        }
+    }
+
+    @State private var mode: ReviewMode = .parkir
     @State private var player: AVPlayer?
     @State private var isLoadingVideo = true
     @State private var selectedAnalysisID: ParkingAnalysis.ID?
     @State private var selectedVehicleID: Int?
+    @State private var selectedFrameID: ReviewFrame.ID?
     @State private var isNearSelectedTimestamp = true
+    @State private var isNearSelectedFrame = false
     @State private var timeObserverToken: Any?
 
     private var analyses: [ParkingAnalysis] {
         model.parkingAnalyses[session.id] ?? []
+    }
+
+    private var damageFrames: [ReviewFrame] {
+        model.roadDamageFrames[session.id] ?? []
+    }
+
+    private var damageFrame: ReviewFrame? {
+        guard let selectedFrameID else { return nil }
+        return damageFrames.first { $0.id == selectedFrameID }
     }
 
     private var analysis: ParkingAnalysis? {
@@ -69,8 +102,13 @@ struct ParkingVideoReviewView: View {
         return CGFloat(analysis.imageWidth) / CGFloat(analysis.imageHeight)
     }
 
+    /// One axis for both verticals, so a damage tick and a parking tick at the same
+    /// x really are the same moment in the footage.
     private var totalSeconds: Double {
-        session.durationSeconds ?? analyses.compactMap(\.sessionRelativeSeconds).max() ?? 0
+        session.durationSeconds
+            ?? (analyses.compactMap(\.sessionRelativeSeconds)
+                + damageFrames.compactMap(\.sessionRelativeSeconds)).max()
+            ?? 0
     }
 
     /// Only worth showing once there's more than one timestamp to compare —
@@ -79,32 +117,64 @@ struct ParkingVideoReviewView: View {
         analyses.compactMap(\.sessionRelativeSeconds).count > 1
     }
 
+    private var showsDamageTimeline: Bool {
+        damageFrames.compactMap(\.sessionRelativeSeconds).count > 1
+    }
+
     var body: some View {
         HStack(spacing: 0) {
             VStack(spacing: 0) {
                 videoArea
+                if !damageFrames.isEmpty {
+                    Picker("", selection: $mode) {
+                        ForEach(ReviewMode.allCases) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .padding(.horizontal, 16)
+                    .padding(.top, 10)
+                }
                 if showsTimeline {
                     ParkingTimelineView(analyses: analyses, totalSeconds: totalSeconds,
                                         selectedAnalysisID: $selectedAnalysisID)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 10)
                 }
-                ParkingCandidateStripView(analyses: analyses, selectedAnalysisID: $selectedAnalysisID)
+                if showsDamageTimeline {
+                    RoadDamageTimelineView(frames: damageFrames, totalSeconds: totalSeconds,
+                                           selectedFrameID: $selectedFrameID)
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 10)
+                }
+                switch mode {
+                case .parkir:
+                    ParkingCandidateStripView(analyses: analyses, selectedAnalysisID: $selectedAnalysisID)
+                case .kerusakan:
+                    RoadDamageFrameStripView(frames: damageFrames, selectedFrameID: $selectedFrameID)
+                }
             }
             .frame(minWidth: 480, maxWidth: .infinity)
 
-            if let analysis {
-                // The detected-vehicle frame used to have its own pane here
-                // — it now lives at the top of ParkingMetricsPanel's BEV
-                // section instead, so the video player (left) is free to
-                // use the space this pane used to take.
-                ParkingMetricsPanel(analysis: analysis, selectedVehicleID: selectedVehicleID)
+            switch mode {
+            case .parkir:
+                if let analysis {
+                    // The detected-vehicle frame used to have its own pane here
+                    // — it now lives at the top of ParkingMetricsPanel's BEV
+                    // section instead, so the video player (left) is free to
+                    // use the space this pane used to take.
+                    ParkingMetricsPanel(analysis: analysis, selectedVehicleID: selectedVehicleID)
+                }
+            case .kerusakan:
+                if let damageFrame {
+                    RoadDamagePanel(frame: damageFrame)
+                }
             }
         }
         .navigationTitle(session.roadName)
-        .navigationSubtitle("\(analyses.count) kendaraan terdeteksi")
+        .navigationSubtitle(subtitle)
         .task {
             selectedAnalysisID = analyses.first?.id
+            selectedFrameID = damageFrames.first { !$0.findings.isEmpty }?.id ?? damageFrames.first?.id
             await loadPlayer()
         }
         .onChange(of: selectedAnalysisID) { _, _ in
@@ -117,11 +187,23 @@ struct ParkingVideoReviewView: View {
             guard let analysisID = analysis?.id else { return }
             Task { await model.selectParkingVehicle(sessionID: session.id, analysisID: analysisID, vehicleID: newValue) }
         }
+        .onChange(of: selectedFrameID) { _, _ in
+            // Picking a damage tick switches the pane to it — otherwise the click
+            // would seek the video while the right-hand side still described a car.
+            mode = .kerusakan
+            seekToSelectedFrame()
+        }
         .onDisappear {
             if let player, let timeObserverToken {
                 player.removeTimeObserver(timeObserverToken)
             }
         }
+    }
+
+    private var subtitle: String {
+        let damaged = damageFrames.filter { !$0.findings.isEmpty }.count
+        guard !damageFrames.isEmpty else { return "\(analyses.count) kendaraan terdeteksi" }
+        return "\(analyses.count) kendaraan · \(damaged) dari \(damageFrames.count) frame berisi kerusakan"
     }
 
     @ViewBuilder
@@ -140,7 +222,7 @@ struct ParkingVideoReviewView: View {
                         .frame(width: geo.size.width, height: geo.size.height)
                 }
 
-                if isNearSelectedTimestamp, let analysis, let selectedVehicle {
+                if mode == .parkir, isNearSelectedTimestamp, let analysis, let selectedVehicle {
                     let rect = ParkingMetrics.normalizedRect(for: selectedVehicle, imageWidth: analysis.imageWidth,
                                                              imageHeight: analysis.imageHeight)
                     if rect.width > 0, rect.height > 0 {
@@ -148,6 +230,24 @@ struct ParkingVideoReviewView: View {
                             .frame(width: rect.width * geo.size.width, height: rect.height * geo.size.height)
                             .position(x: (rect.minX + rect.width / 2) * geo.size.width,
                                      y: (rect.minY + rect.height / 2) * geo.size.height)
+                    }
+                }
+
+                // Same proximity rule as the vehicle box, and for the same reason:
+                // these boxes are only correct at the exact sampled frame. At the
+                // 5 s default the playhead is off that frame far more often than
+                // on it, so drawing them continuously would put a pothole outline
+                // over whatever happens to be on screen.
+                if mode == .kerusakan, isNearSelectedFrame, let damageFrame {
+                    ForEach(damageFrame.findings) { finding in
+                        let rect = finding.frameRect
+                        if rect.width > 0, rect.height > 0 {
+                            RoadDamageFindingOverlay(finding: finding)
+                                .frame(width: rect.width * geo.size.width,
+                                       height: rect.height * geo.size.height)
+                                .position(x: (rect.minX + rect.width / 2) * geo.size.width,
+                                          y: (rect.minY + rect.height / 2) * geo.size.height)
+                        }
                     }
                 }
             }
@@ -166,17 +266,45 @@ struct ParkingVideoReviewView: View {
         seekToSelectedAnalysis()
 
         timeObserverToken = newPlayer.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.25, preferredTimescale: 600), queue: .main) { time in
-            guard let target = self.analysis?.sessionRelativeSeconds else {
+            if let target = self.analysis?.sessionRelativeSeconds {
+                self.isNearSelectedTimestamp = abs(time.seconds - target) < 0.5
+            } else {
                 self.isNearSelectedTimestamp = false
-                return
             }
-            self.isNearSelectedTimestamp = abs(time.seconds - target) < 0.5
+            if let target = self.damageFrame?.sessionRelativeSeconds {
+                self.isNearSelectedFrame = abs(time.seconds - target) < 0.5
+            } else {
+                self.isNearSelectedFrame = false
+            }
         }
     }
 
     private func seekToSelectedAnalysis() {
         guard let player, let seconds = analysis?.sessionRelativeSeconds else { return }
         player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
+    private func seekToSelectedFrame() {
+        guard let player, let seconds = damageFrame?.sessionRelativeSeconds else { return }
+        player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+}
+
+/// One finding's box on the video, coloured by defect type — the same colour
+/// language `DefectSwatch` uses in the panel beside it, so a reviewer matches a
+/// box to a row by colour rather than by counting.
+///
+/// Per ADR-015 this vertical ships boxes, not masks: `Finding` has no mask field
+/// and drawing a smooth outline here would imply a precision the detector does not
+/// have.
+private struct RoadDamageFindingOverlay: View {
+    let finding: Finding
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 3)
+            .stroke(finding.defectType.color, lineWidth: 2)
+            .shadow(color: finding.defectType.color.opacity(0.5), radius: 6)
+            .allowsHitTesting(false)
     }
 }
 

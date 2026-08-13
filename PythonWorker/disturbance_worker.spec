@@ -14,12 +14,32 @@
 # PyInstaller's static import analysis misses both real submodules and non-.py
 # data files (tokenizer configs, image-processor JSON, torchvision codecs).
 # This was verified empirically against a real run of this spec, not assumed.
+#
+# hf_cache_staging/: the semantic and depth-estimation Mask2Former/Depth-
+# Anything models are loaded via `from_pretrained()` at RUNTIME with no
+# try/except around the call (unlike the optional instance-segmentation
+# model), so a machine that can't reach huggingface.co on first run hard-fails
+# every disturbance-scoring request. Bundled here the same way CarDetection
+# bundles its torch.hub cache: worker_main.py copies this to a writable
+# location and points HF_HOME at it before anything calls `from_pretrained`,
+# so the frozen app never needs network access. Populated by
+# `build_worker.sh` from the build machine's own ~/.cache/huggingface/hub if
+# present.
+
+import os
+from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all
+
+ROOT = Path(os.path.dirname(os.path.abspath(SPEC)))
 
 datas = [("checkpoints/ofrsnet_best.pt", "checkpoints")]
 binaries = []
 hiddenimports = []
+
+hf_cache_src = ROOT / "hf_cache_staging"
+if hf_cache_src.is_dir():
+    datas.append((str(hf_cache_src), "hf_cache_staging"))
 
 for pkg in ("torch", "torchvision", "transformers", "accelerate", "cv2",
             "tokenizers", "safetensors", "scipy"):

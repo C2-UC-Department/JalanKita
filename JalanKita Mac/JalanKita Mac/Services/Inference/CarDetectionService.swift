@@ -53,28 +53,31 @@ final class CarDetectionService {
         return CarDetectionResult(summary: summary, screenshotDir: screenshotDir)
     }
 
-    /// Resolution order, mirroring InferenceService.resolveWorkerLaunch() exactly:
-    ///  1. **Packaged**: `Contents/Resources/pipeline_v13/pipeline_v13` -- the
-    ///     PyInstaller onedir output staged there by the "Stage pipeline_v13"
-    ///     run-script phase (see JalanKita Mac.xcodeproj and
-    ///     `CarDetection/build_worker.sh`). Invoked directly with no leading
+    /// Resolution order (mirrors InferenceService.resolveWorkerLaunch()):
+    ///  1. **Packaged**: `Contents/Resources/car-detection/cardetection` --
+    ///     the PyInstaller onedir output staged there by the "Stage
+    ///     CarDetection" run-script build phase (see
+    ///     JalanKita Mac.xcodeproj, and `CarDetection/build_cardetection.sh`).
+    ///     This is how the shipped app runs car detection without a dev
+    ///     Python environment present. Invoked directly with no leading
     ///     script argument -- the frozen executable takes the same
     ///     `--input`/`--output`/`--screenshot-dir` flags pipeline_v13.py does.
     ///  2. **Dev, explicit**: `JALANKITA_V13_REPO` + `JALANKITA_V13_PYTHON`
-    ///     env vars, for anyone whose checkout doesn't match the layout below
-    ///     (e.g. a separate full v13 dev checkout with more than the trimmed
-    ///     runtime files). Both override independently so only the mismatched
-    ///     half needs setting.
-    ///  3. **Dev, zero-config**: `CarDetection/` as a sibling of `PythonWorker/`
-    ///     inside this repo (found via this source file's own `#filePath`,
-    ///     same climb depth `InferenceService.autoDetectedPythonWorkerRoot()`
-    ///     uses to reach repo root), interpreted by its own
-    ///     `CarDetection/.venv/bin/python3` -- built via `python3 -m venv
-    ///     .venv && pip install -r requirements.txt`, same recipe as
-    ///     PythonWorker/README's dev setup.
+    ///     env vars, for anyone whose checkout doesn't match the layout
+    ///     below (e.g. a separate full v13 dev checkout with more than the
+    ///     trimmed runtime files).
+    ///  3. **Dev, zero-config**: `CarDetection/` as a sibling of
+    ///     `PythonWorker/` inside this repo (found via this source file's
+    ///     own `#filePath`, same climb depth
+    ///     `InferenceService.autoDetectedPythonWorkerRoot()` uses to reach
+    ///     repo root), interpreted by its own `CarDetection/.venv/bin/python3`
+    ///     -- built via `python3 -m venv .venv && pip install -r
+    ///     requirements.txt`, same recipe as PythonWorker/README's dev
+    ///     setup. Both env vars override independently so only the
+    ///     mismatched half needs setting.
     private static func resolveLaunch() throws -> (executable: URL, baseArguments: [String], cwd: URL?) {
         if let bundled = Bundle.main.resourceURL?
-            .appendingPathComponent("pipeline_v13/pipeline_v13"),
+            .appendingPathComponent("car-detection/cardetection"),
            FileManager.default.isExecutableFile(atPath: bundled.path) {
             return (bundled, [], nil)
         }
