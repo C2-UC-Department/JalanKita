@@ -19,6 +19,7 @@ struct HomeDashboardView: View {
     @State private var isPresentingSyncSetup = false
     @State private var isImportingVideo = false
     @State private var importError: String?
+    @State private var pendingDeletionID: Session.ID?
 
     var body: some View {
         NavigationStack {
@@ -67,10 +68,29 @@ struct HomeDashboardView: View {
                         ForEach(model.localSessions) { session in
                             SessionRowView(session: session)
                         }
+                        .onDelete { offsets in
+                            if let index = offsets.first {
+                                pendingDeletionID = model.localSessions[index].id
+                            }
+                        }
                     }
                 }
             }
             .navigationTitle("JalanKita")
+            .alert("Hapus sesi ini?", isPresented: Binding(
+                get: { pendingDeletionID != nil },
+                set: { if !$0 { pendingDeletionID = nil } }
+            )) {
+                Button("Hapus", role: .destructive) {
+                    if let id = pendingDeletionID {
+                        model.deleteSession(id)
+                    }
+                    pendingDeletionID = nil
+                }
+                Button("Batal", role: .cancel) { pendingDeletionID = nil }
+            } message: {
+                Text("Video dan hasil analisis sesi ini akan dihapus permanen dari perangkat ini dan iCloud.")
+            }
             .navigationDestination(for: Session.self) { session in
                 SessionDetailView(session: session)
             }

@@ -22,7 +22,6 @@ struct ActiveRecordingView: View {
     @State private var sessionID = UUID().uuidString
     @State private var sessionDirectory: URL?
     @State private var startedAt = Date()
-    @State private var roadName: String = ""
     @State private var didFinish = false
     @State private var isFinishing = false
     @State private var cameraError: String?
@@ -229,7 +228,7 @@ struct ActiveRecordingView: View {
             print("[ActiveRecordingView] capture.stop() completion fired \(Int(Date().timeIntervalSince(tappedAt) * 1000)) ms after tap")
             let session = Session(
                 id: sessionID,
-                roadName: roadName.isEmpty ? "Sesi belum diberi nama" : roadName,
+                roadName: location.resolvedRoadName ?? "Sesi belum diberi nama",
                 date: startedAt.formatted(date: .abbreviated, time: .shortened),
                 surveyor: Surveyor(id: model.surveyorName, name: model.surveyorName),
                 clipCount: clipURLs.count,

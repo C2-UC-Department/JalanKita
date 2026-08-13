@@ -14,14 +14,18 @@
 //
 //  Step 1 of Phase 2 (this file): a single custom zone in the developer's
 //  own private database, no CKShare yet — that's layered in step 2, once
-//  the schema and ingestion pipeline are proven end to end. Manual/
-//  foreground-triggered sync only; no push/CKQuerySubscription yet.
+//  the schema and ingestion pipeline are proven end to end.
+//
+//  Push: a CKRecordZoneSubscription on the surveyor's zone wakes this app
+//  via a silent remote notification (forwarded from AppDelegate), so
+//  syncNow() also runs promptly while backgrounded, not just on foreground.
 //
 
 import CloudKit
 import Foundation
 import JalanKitaKit
 import Observation
+import UIKit
 
 @MainActor
 protocol CloudKitSyncDataSource: AnyObject {
@@ -38,6 +42,11 @@ protocol CloudKitSyncDataSource: AnyObject {
     /// back — image/BEV already copied to a stable local file by the sync
     /// engine, ready to persist and display.
     func applyIncomingParkingResult(_ result: DownloadedParkingResult)
+    /// The Session record for `sessionID` was deleted remotely (on the Mac
+    /// or another device) — remove it and everything derived from it
+    /// locally. Must NOT enqueue another CloudKit deletion; it's already
+    /// gone server-side.
+    func applyIncomingSessionDeletion(_ sessionID: String)
 }
 
 @MainActor
@@ -48,9 +57,11 @@ final class CloudKitSyncEngine {
 
     weak var dataSource: CloudKitSyncDataSource?
 
+    private let surveyorID: String
     private let zoneID: CKRecordZone.ID
     private let database: CKDatabase
     private let zoneProvisionedKey: String
+    private let zoneSubscriptionKey: String
     private let changeTokenFileURL: URL
     private let syncStates: SessionSyncStateStore
     private let appSupportDir: URL
@@ -62,17 +73,42 @@ final class CloudKitSyncEngine {
     /// completes just re-queues next time rather than needing this set
     /// itself to survive a relaunch.
     private var pendingRecordIDs: Set<CKRecord.ID> = []
+    /// Session deletions waiting for the next `syncNow()` to push. Only
+    /// needs the record ID, not the `Session` itself — the local session
+    /// may already be gone by the time this is enqueued, and CloudKit
+    /// cascades the delete to the Session's Clip/GPSTrack/ParkingResult
+    /// children server-side via their `.deleteSelf` references.
+    private var pendingDeletionIDs: Set<CKRecord.ID> = []
     private var changeToken: CKServerChangeToken?
 
     init(surveyorID: String, appSupportDir: URL, syncStates: SessionSyncStateStore) {
+        self.surveyorID = surveyorID
         let zoneName = CloudKitSchema.zoneName(surveyorID: surveyorID)
         zoneID = CKRecordZone.ID(zoneName: zoneName, ownerName: CKCurrentUserDefaultName)
         zoneProvisionedKey = "cloudkit_zone_provisioned_\(zoneName)"
+        zoneSubscriptionKey = "cloudkit_zone_subscribed_\(zoneName)"
         changeTokenFileURL = appSupportDir.appendingPathComponent("cloudkit_change_token_\(zoneName).data")
         self.syncStates = syncStates
         self.appSupportDir = appSupportDir
         database = CKContainer(identifier: CloudKitSchema.containerIdentifier).privateCloudDatabase
-        changeToken = Self.loadChangeToken(from: changeTokenFileURL)
+        changeToken = CKChangeTokenStore.load(from: changeTokenFileURL)
+
+        // AppDelegate forwards a CloudKit remote notification here since
+        // this engine is constructed inside AppModel, after the delegate,
+        // so no direct reference exists at callback time — same
+        // decoupling shape the Mac's engine uses for shareAccepted.
+        NotificationCenter.default.addObserver(
+            forName: AppDelegate.remoteNotificationReceivedNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let userInfo = note.userInfo?[AppDelegate.userInfoKey] as? [AnyHashable: Any],
+                  CloudKitPushNotification.parse(userInfo: userInfo) != nil
+            else { return }
+            let completion = note.userInfo?[AppDelegate.completionHandlerKey] as? (UIBackgroundFetchResult) -> Void
+            Task { [weak self] in
+                await self?.syncNow()
+                completion?(self?.lastError == nil ? .newData : .failed)
+            }
+        }
     }
 
     // MARK: - Enqueuing local changes
@@ -91,11 +127,19 @@ final class CloudKitSyncEngine {
         pendingRecordIDs.insert(profile.recordID(zoneID: zoneID))
     }
 
+    /// Queues this session's Session record for deletion. No need to
+    /// resolve a `Session` object — CloudKit cascades the delete to
+    /// Clip/GPSTrack/ParkingResult children automatically.
+    func enqueueSessionDeletion(_ sessionID: String) {
+        pendingDeletionIDs.insert(CKRecord.ID(recordName: sessionID, zoneID: zoneID))
+    }
+
     func syncNow() async {
         isSyncing = true
         defer { isSyncing = false }
         do {
             try await ensureZoneProvisioned()
+            try await ensureSubscribed()
             try await sendPendingRecords()
             try await fetchRemoteChanges()
             lastError = nil
@@ -111,19 +155,32 @@ final class CloudKitSyncEngine {
         UserDefaults.standard.set(true, forKey: zoneProvisionedKey)
     }
 
+    private func ensureSubscribed() async throws {
+        let subscription = CKRecordZoneSubscription(
+            zoneID: zoneID,
+            subscriptionID: CloudKitSchema.SubscriptionID.iOSPrivateZone(surveyorID: surveyorID)
+        )
+        subscription.notificationInfo = .silentContentAvailable
+        try await CloudKitSubscriptionRegistrar.ensureSubscription(
+            subscription, database: database, idempotencyKey: zoneSubscriptionKey
+        )
+    }
+
     // MARK: - Sending
 
     private func sendPendingRecords() async throws {
-        guard !pendingRecordIDs.isEmpty else { return }
+        guard !pendingRecordIDs.isEmpty || !pendingDeletionIDs.isEmpty else { return }
         var recordsToSave: [CKRecord] = []
         for recordID in pendingRecordIDs {
             if let record = await buildRecord(for: recordID) {
                 recordsToSave.append(record)
             }
         }
-        guard !recordsToSave.isEmpty else { return }
+        guard !recordsToSave.isEmpty || !pendingDeletionIDs.isEmpty else { return }
 
-        let result = try await database.modifyRecords(saving: recordsToSave, deleting: [], savePolicy: .changedKeys, atomically: false)
+        let result = try await database.modifyRecords(
+            saving: recordsToSave, deleting: Array(pendingDeletionIDs), savePolicy: .changedKeys, atomically: false
+        )
         for (recordID, saveResult) in result.saveResults {
             switch saveResult {
             case .success:
@@ -134,6 +191,14 @@ final class CloudKitSyncEngine {
                 if let ckError = error as? CKError {
                     recordSaveFailed(recordID, error: ckError)
                 }
+            }
+        }
+        for (recordID, deleteResult) in result.deleteResults {
+            switch deleteResult {
+            case .success:
+                pendingDeletionIDs.remove(recordID)
+            case .failure(let error):
+                print("[CloudKitSyncEngine/iOS] FAILED to delete \(recordID.recordName): \(error)")
             }
         }
     }
@@ -152,8 +217,11 @@ final class CloudKitSyncEngine {
                     print("[CloudKitSyncEngine/iOS] fetch modification failed: \(error)")
                 }
             }
+            for deletion in result.deletions where deletion.recordType == CloudKitSchema.RecordType.session {
+                dataSource?.applyIncomingSessionDeletion(deletion.recordID.recordName)
+            }
             changeToken = result.changeToken
-            Self.saveChangeToken(changeToken, to: changeTokenFileURL)
+            CKChangeTokenStore.save(changeToken, to: changeTokenFileURL)
             moreComing = result.moreComing
         }
     }
@@ -348,19 +416,5 @@ final class CloudKitSyncEngine {
         share[CKShare.SystemFieldKey.title] = "Sesi survei JalanKita" as CKRecordValue
         _ = try await database.modifyRecords(saving: [share], deleting: [], savePolicy: .changedKeys, atomically: true)
         return share
-    }
-
-    // MARK: - Change token persistence
-
-    private static func loadChangeToken(from url: URL) -> CKServerChangeToken? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? NSKeyedUnarchiver.unarchivedObject(ofClass: CKServerChangeToken.self, from: data)
-    }
-
-    private static func saveChangeToken(_ token: CKServerChangeToken?, to url: URL) {
-        guard let token,
-              let data = try? NSKeyedArchiver.archivedData(withRootObject: token, requiringSecureCoding: true)
-        else { return }
-        try? data.write(to: url, options: .atomic)
     }
 }

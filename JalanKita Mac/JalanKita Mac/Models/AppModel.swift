@@ -485,8 +485,31 @@ final class AppModel {
     /// Removes a session and everything derived from it — the metadata
     /// (`parkingAnalyses`/`pipelineSteps`/`logLines`), and its on-disk video
     /// files, so a deleted session doesn't leave orphaned footage behind.
+    /// Also deletes the session's CloudKit record, which CloudKit cascades
+    /// to its Clip/GPSTrack/ParkingResult children server-side (they
+    /// reference the Session via a `.deleteSelf` `CKRecord.Reference`), so
+    /// the deletion propagates to every other device synced to this
+    /// surveyor's zone rather than staying local-only.
     func deleteSession(_ sessionID: Session.ID) {
         guard let session = sessions.first(where: { $0.id == sessionID }) else { return }
+        let zoneID = surveyorZones[session.surveyor.name]
+        performLocalSessionCleanup(sessionID: sessionID, session: session)
+
+        if let zoneID {
+            cloudKitSyncEngine.enqueueSessionDeletion(sessionID: sessionID, zoneID: zoneID)
+            Task { await syncNow() }
+        }
+    }
+
+    /// The Session record for `sessionID` was deleted on another device —
+    /// clean up locally without re-deleting it from CloudKit (it's already
+    /// gone there). Called by `SyncedSessionIngestor.didDeleteSession`.
+    func applyIncomingSessionDeletion(_ sessionID: Session.ID) {
+        guard let session = sessions.first(where: { $0.id == sessionID }) else { return }
+        performLocalSessionCleanup(sessionID: sessionID, session: session)
+    }
+
+    private func performLocalSessionCleanup(sessionID: Session.ID, session: Session) {
         sessions.removeAll { $0.id == sessionID }
         parkingAnalyses.removeValue(forKey: sessionID)
         pipelineSteps.removeValue(forKey: sessionID)
@@ -500,6 +523,30 @@ final class AppModel {
         for clipIndex in 0..<session.clipCount {
             try? fm.removeItem(at: Self.carDetectionWorkDir(sessionID: "\(sessionID)-clip\(clipIndex)"))
         }
+    }
+
+    /// Renames a manually-uploaded session (one with no `recordedDate` —
+    /// i.e. added via "Unggah…", not recorded on an iPhone; real-recording
+    /// sessions aren't renamable here). Pushes the rename to every known
+    /// surveyor zone if the session was already synced, mirroring
+    /// `pushCompletedManualUploads`'s broadcast pattern — a manual upload
+    /// has no single "owning" zone of its own, so it's copied into every
+    /// zone this Mac knows about, same as its initial push.
+    func renameSession(_ sessionID: Session.ID, to newName: String) {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let index = sessions.firstIndex(where: { $0.id == sessionID }),
+              sessions[index].recordedDate == nil,
+              sessions[index].roadName != trimmed
+        else { return }
+        sessions[index].roadName = trimmed
+
+        guard manualUploadsPushed.contains(sessionID), !surveyorZones.isEmpty else { return }
+        let session = sessions[index]
+        for zoneID in surveyorZones.values {
+            cloudKitSyncEngine.enqueueSessionUpdate(session, zoneID: zoneID)
+        }
+        Task { await syncNow() }
     }
 
     private func runSyncedSessionAnalysis(sessionID: String, clipURLs: [URL], zoneID: CKRecordZone.ID) async {

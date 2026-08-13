@@ -32,6 +32,14 @@ public enum CloudKitSchema {
         public static let segmentResult = "SegmentResult"
     }
 
+    public enum SubscriptionID {
+        public static func iOSPrivateZone(surveyorID: String) -> String {
+            "sub-zone-\(zoneName(surveyorID: surveyorID))"
+        }
+        public static let macPrivateDatabase = "sub-mac-private-db"
+        public static let macSharedDatabase = "sub-mac-shared-db"
+    }
+
     /// `Session.date`/`.duration` are locale-formatted display strings and are
     /// deliberately NOT synced verbatim — `recordedDate`/`durationSeconds` are
     /// the canonical values; each platform formats its own display string

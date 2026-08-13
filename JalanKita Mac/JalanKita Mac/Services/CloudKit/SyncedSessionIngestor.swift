@@ -66,6 +66,11 @@ final class SyncedSessionIngestor: CloudKitIngestDelegate {
         // own doc-comment: the pixel-to-metres math isn't wired in anywhere).
     }
 
+    func didDeleteSession(sessionID: String) {
+        buffers.removeValue(forKey: sessionID)
+        appModel?.applyIncomingSessionDeletion(sessionID)
+    }
+
     private func sessionDirectory(_ sessionID: String) -> URL {
         let dir = workDir.appendingPathComponent(sessionID, isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

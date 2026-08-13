@@ -33,6 +33,10 @@ final class LocationTracker: NSObject {
     /// 3-hour shift this is ~10k points / ~170KB — trivial to hold in
     /// memory; the durable, full-resolution record is the CSV on disk.
     private(set) var trackCoordinates: [CLLocationCoordinate2D] = []
+    /// Street name resolved from the first GPS fix of the recording, for
+    /// defaulting the session's display name. Nil until the one-shot
+    /// reverse geocode (kicked off from `append(_:)`) resolves or fails.
+    private(set) var resolvedRoadName: String?
 
     private let manager = CLLocationManager()
     private var csvHandle: FileHandle?
@@ -48,6 +52,9 @@ final class LocationTracker: NSObject {
     /// every real session read as degraded, which defeats the point of
     /// that status meaning something went actually wrong.
     private var consecutiveBadFixes = 0
+    /// Ensures the reverse geocode fires once per recording, off the first
+    /// fix, rather than on every subsequent fix.
+    private var hasStartedGeocoding = false
 
     private static let isoFormatter = ISO8601DateFormatter()
     private static let accuracyThresholdMeters = 50.0
@@ -84,6 +91,8 @@ final class LocationTracker: NSObject {
         lastLocation = nil
         lastFixDate = nil
         trackCoordinates = []
+        resolvedRoadName = nil
+        hasStartedGeocoding = false
         state = .notStarted
         manager.startUpdatingLocation()
         startStaleCheckTimer()
@@ -129,6 +138,22 @@ final class LocationTracker: NSObject {
         trackCoordinates.append(location.coordinate)
         lastAccuracyMeters = location.horizontalAccuracy
         lastFixDate = location.timestamp
+
+        if !hasStartedGeocoding {
+            hasStartedGeocoding = true
+            let geocodeLocation = location
+            Task { [weak self] in
+                do {
+                    let placemarks = try await CLGeocoder().reverseGeocodeLocation(geocodeLocation)
+                    guard let placemark = placemarks.first else { return }
+                    await MainActor.run {
+                        self?.resolvedRoadName = placemark.thoroughfare ?? placemark.name
+                    }
+                } catch {
+                    print("[LocationTracker] reverse geocode failed: \(error)")
+                }
+            }
+        }
 
         let isGoodFix = location.horizontalAccuracy > 0 && location.horizontalAccuracy < Self.accuracyThresholdMeters
         if isGoodFix {

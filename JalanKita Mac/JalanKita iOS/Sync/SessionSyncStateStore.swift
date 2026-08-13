@@ -113,4 +113,9 @@ final class SessionSyncStateStore {
         let s = state(for: sessionID)
         return s.uploadedClipIndices.count >= clipCount && s.gpsTrackUploaded
     }
+
+    func remove(_ sessionID: String) {
+        guard states.removeValue(forKey: sessionID) != nil else { return }
+        save()
+    }
 }

@@ -101,6 +101,16 @@ final class RecordingSessionStore {
         saveIndex(sessions)
     }
 
+    func removeFromIndex(_ sessionID: String) {
+        saveIndex(loadIndex().filter { $0.id != sessionID })
+    }
+
+    /// `<AppSupport>/Sessions/<sessionID>/` — for the delete flow to remove
+    /// a session's clips + gps.csv in one directory removal.
+    func sessionDirectory(sessionID: String) -> URL {
+        sessionsDir.appendingPathComponent(sessionID, isDirectory: true)
+    }
+
     func loadCalibration() -> CalibrationProfile? {
         guard let data = try? Data(contentsOf: calibrationURL) else { return nil }
         return try? JSONDecoder().decode(CalibrationProfile.self, from: data)

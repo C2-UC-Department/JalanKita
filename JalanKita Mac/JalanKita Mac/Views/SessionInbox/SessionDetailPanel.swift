@@ -18,6 +18,7 @@ struct SessionDetailPanel: View {
     var model: AppModel
 
     @State private var coordinates: [CLLocationCoordinate2D] = []
+    @State private var editedRoadName: String = ""
 
     private var hasParkingResults: Bool {
         !(model.parkingAnalyses[session.id]?.isEmpty ?? true)
@@ -38,8 +39,23 @@ struct SessionDetailPanel: View {
                 SectionLabel(text: "SESI TERPILIH")
 
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(session.roadName)
-                        .font(.title3.weight(.bold))
+                    // Only a manually-uploaded session's name is editable —
+                    // an iPhone recording's name comes from reverse
+                    // geocoding at recording time and isn't renamable here.
+                    if isSyncedSession {
+                        Text(session.roadName)
+                            .font(.title3.weight(.bold))
+                    } else {
+                        TextField("Nama sesi", text: $editedRoadName)
+                            .font(.title3.weight(.bold))
+                            .textFieldStyle(.plain)
+                            .onSubmit {
+                                model.renameSession(session.id, to: editedRoadName)
+                            }
+                            .task(id: session.id) {
+                                editedRoadName = session.roadName
+                            }
+                    }
                     Text("\(session.date) · \(session.surveyor.name)")
                         .font(.callout)
                         .foregroundStyle(.secondary)

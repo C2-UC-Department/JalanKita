@@ -18,11 +18,30 @@ import AppKit
 import CloudKit
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    static let remoteNotificationReceivedNotification = Notification.Name("AppDelegate.remoteNotificationReceived")
+    static let userInfoKey = "userInfo"
+
     func application(_ application: NSApplication, userDidAcceptCloudKitShareWith metadata: CKShare.Metadata) {
         NotificationCenter.default.post(
             name: CloudKitSyncEngine.shareAcceptedNotification,
             object: nil,
             userInfo: [CloudKitSyncEngine.shareMetadataUserInfoKey: metadata]
+        )
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApplication.shared.registerForRemoteNotifications()
+    }
+
+    func application(_ application: NSApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        print("[AppDelegate/Mac] didFailToRegisterForRemoteNotificationsWithError: \(error)")
+    }
+
+    func application(_ application: NSApplication, didReceiveRemoteNotification userInfo: [String: Any]) {
+        NotificationCenter.default.post(
+            name: Self.remoteNotificationReceivedNotification,
+            object: nil,
+            userInfo: [Self.userInfoKey: userInfo]
         )
     }
 }

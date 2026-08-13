@@ -53,4 +53,9 @@ final class ParkingResultStore {
         resultsBySessionID[result.sessionID] = results
         save()
     }
+
+    func remove(sessionID: String) {
+        guard resultsBySessionID.removeValue(forKey: sessionID) != nil else { return }
+        save()
+    }
 }

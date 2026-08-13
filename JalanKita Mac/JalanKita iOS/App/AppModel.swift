@@ -156,14 +156,40 @@ final class AppModel {
         return h > 0 ? "\(h) j \(m) m" : "\(m) m"
     }
 
-    /// Manual/foreground sync trigger — no push infrastructure in this
-    /// phase, so this is the only way changes actually move.
+    /// Sync trigger — also fires automatically via CloudKit push (see
+    /// CloudKitSyncEngine's remote-notification observer), scenePhase
+    /// changes, and right after a recording finishes; this is the manual
+    /// fallback ("Sinkronkan" button).
     func syncNow() async {
         await syncEngine.syncNow()
     }
 
     func parkingResults(sessionID: String) -> [DownloadedParkingResult] {
         parkingResultStore.results(sessionID: sessionID)
+    }
+
+    /// Removes a session and everything derived from it locally, and
+    /// deletes its CloudKit record — which CloudKit cascades to its
+    /// Clip/GPSTrack/ParkingResult children server-side (they reference
+    /// the Session via a `.deleteSelf` `CKRecord.Reference`), so the
+    /// deletion propagates to the Mac too.
+    func deleteSession(_ sessionID: Session.ID) {
+        performLocalSessionCleanup(sessionID: sessionID)
+        syncEngine.enqueueSessionDeletion(sessionID)
+        Task { await syncEngine.syncNow() }
+    }
+
+    private func performLocalSessionCleanup(sessionID: Session.ID) {
+        localSessions.removeAll { $0.id == sessionID }
+        store.removeFromIndex(sessionID)
+        syncStates.remove(sessionID)
+        parkingResultStore.remove(sessionID: sessionID)
+
+        let fm = FileManager.default
+        try? fm.removeItem(at: store.sessionDirectory(sessionID: sessionID))
+        try? fm.removeItem(at: store.appSupportDirectory
+            .appendingPathComponent("ParkingResults", isDirectory: true)
+            .appendingPathComponent(sessionID, isDirectory: true))
     }
 }
 
@@ -193,15 +219,20 @@ extension AppModel: CloudKitSyncDataSource {
     /// A Session record came back from CloudKit. Usually this is the Mac
     /// updating fields it owns (status, segmentCount) on a session this
     /// device itself recorded — merge those in without clobbering the
-    /// iOS-owned fields. But it can also be a session that originated
-    /// elsewhere in this zone entirely (e.g. the Mac operator manually
-    /// uploaded a video with no GPS and pushed it here for testing) — in
-    /// that case there's nothing local to merge into, so it's inserted as
-    /// new instead of silently dropped.
+    /// iOS-owned fields. `roadName` is also merged: this device never
+    /// writes it for a session it didn't originate, so there's no conflict
+    /// to protect against, and this is what makes a Mac rename of a
+    /// manually-uploaded session (that already synced to this device once)
+    /// actually reach it. But the incoming record can also be a session
+    /// that originated elsewhere in this zone entirely (e.g. the Mac
+    /// operator manually uploaded a video with no GPS and pushed it here
+    /// for testing) — in that case there's nothing local to merge into, so
+    /// it's inserted as new instead of silently dropped.
     func applyIncomingSession(_ incoming: Session) {
         if let index = localSessions.firstIndex(where: { $0.id == incoming.id }) {
             localSessions[index].status = incoming.status
             localSessions[index].segmentCount = incoming.segmentCount
+            localSessions[index].roadName = incoming.roadName
         } else {
             localSessions.insert(incoming, at: 0)
             syncStates.ensureTracked(sessionIDs: [incoming.id])
@@ -212,5 +243,12 @@ extension AppModel: CloudKitSyncDataSource {
 
     func applyIncomingParkingResult(_ result: DownloadedParkingResult) {
         parkingResultStore.upsert(result)
+    }
+
+    /// The Session record for `sessionID` was deleted on another device —
+    /// clean up locally without re-deleting it from CloudKit (it's already
+    /// gone there).
+    func applyIncomingSessionDeletion(_ sessionID: String) {
+        performLocalSessionCleanup(sessionID: sessionID)
     }
 }
