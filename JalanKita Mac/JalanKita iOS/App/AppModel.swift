@@ -136,7 +136,7 @@ final class AppModel {
             date: Date().formatted(date: .abbreviated, time: .shortened),
             surveyor: Surveyor(id: surveyorName, name: surveyorName),
             clipCount: 1,
-            duration: Self.formattedDuration(durationSeconds),
+            duration: Session.formattedDuration(durationSeconds),
             distanceKm: 0,
             gpsAccuracyM: nil,
             gpsHz: nil,
@@ -148,12 +148,6 @@ final class AppModel {
         )
         let gpsSummary = SyncedGPSTrack(sessionID: sessionID, pointCount: 0, minLatitude: 0, minLongitude: 0, maxLatitude: 0, maxLongitude: 0)
         recordingFinished(session, gpsSummary: gpsSummary)
-    }
-
-    private static func formattedDuration(_ seconds: TimeInterval) -> String {
-        let total = Int(seconds)
-        let h = total / 3600, m = (total % 3600) / 60
-        return h > 0 ? "\(h) j \(m) m" : "\(m) m"
     }
 
     /// Sync trigger — also fires automatically via CloudKit push (see

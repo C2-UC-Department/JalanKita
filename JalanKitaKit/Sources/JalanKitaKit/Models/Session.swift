@@ -59,3 +59,17 @@ public struct Session: Identifiable, Hashable, Codable, Sendable {
         self.durationSeconds = durationSeconds
     }
 }
+
+extension Session {
+    /// Indonesian-formatted duration string, shared by every place a
+    /// `Session`'s `durationSeconds` becomes display text. A sub-minute
+    /// recording (a quick test clip, a short segment) previously fell
+    /// straight to "0 m" — indistinguishable from missing data.
+    public static func formattedDuration(_ seconds: Double?) -> String {
+        guard let seconds else { return "—" }
+        let total = Int(seconds)
+        if total < 60 { return "\(total) dtk" }
+        let h = total / 3600, m = (total % 3600) / 60
+        return h > 0 ? "\(h) j \(m) m" : "\(m) m"
+    }
+}

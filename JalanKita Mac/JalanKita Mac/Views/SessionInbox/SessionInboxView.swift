@@ -101,6 +101,29 @@ struct SessionInboxView: View {
         value.formatted(.number.locale(Locale(identifier: "id_ID")).precision(.fractionLength(1)))
     }
 
+    /// GB alone rounds any file under ~50 MB to a misleading "0,0" at the
+    /// stat tiles' one-decimal precision — a single manually-uploaded photo
+    /// or short video routinely falls in that range. Switching to MB below
+    /// 1 GB keeps small, real sizes visible instead of reading as zero/broken.
+    private func formattedSize(gb: Double) -> (value: String, unit: String) {
+        if gb < 1 {
+            let mb = gb * 1024
+            return (mb.formatted(.number.locale(Locale(identifier: "id_ID")).precision(.fractionLength(0))), "MB")
+        }
+        return (formattedGB(gb), "GB")
+    }
+
+    /// Same failure mode as `formattedSize(gb:)` above, same fix: a short
+    /// segment or just-started session under ~50 m rounds to a misleading
+    /// "0,0" at one-decimal km precision, so switch to metres below 1 km.
+    private func formattedDistance(km: Double) -> (value: String, unit: String) {
+        if km < 1 {
+            let m = km * 1000
+            return (m.formatted(.number.locale(Locale(identifier: "id_ID")).precision(.fractionLength(0))), "m")
+        }
+        return (formattedGB(km), "km")
+    }
+
     private func handlePhotoImport(_ result: Result<URL, Error>) {
         switch result {
         case .failure(let error):
@@ -181,7 +204,8 @@ struct SessionInboxView: View {
     /// full control of the pane, the inset content is measured at its own
     /// natural size and pinned above it.
     private var statRow: some View {
-        VStack(spacing: 0) {
+        let pendingSize = formattedSize(gb: model.pendingSizeGB)
+        return VStack(spacing: 0) {
             HStack(spacing: 0) {
                 StatTile(title: "MENUNGGU DIPROSES", value: "\(model.newSessionsCount)", unit: "sesi")
                 Divider()
@@ -191,7 +215,7 @@ struct SessionInboxView: View {
                 StatTile(title: "PERLU PERHATIAN", value: "\(model.attentionNeededCount)", unit: nil,
                          detail: "terdegradasi/gagal", accent: Severity.urgent.literalColor)
                 Divider()
-                StatTile(title: "UKURAN TOTAL", value: formattedGB(model.pendingSizeGB), unit: "GB")
+                StatTile(title: "UKURAN DATA", value: pendingSize.value, unit: pendingSize.unit)
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 14)
@@ -229,7 +253,7 @@ struct SessionInboxView: View {
             .width(80)
 
             TableColumn("Jarak", value: \.distanceKm) { session in
-                measurement(session.distanceKm, unit: "km")
+                measurement(formattedDistance(km: session.distanceKm))
             }
             .width(80)
 
@@ -239,7 +263,7 @@ struct SessionInboxView: View {
             .width(100)
 
             TableColumn("Ukuran", value: \.sizeGB) { session in
-                measurement(session.sizeGB, unit: "GB")
+                measurement(formattedSize(gb: session.sizeGB))
             }
             .width(80)
 
@@ -261,10 +285,10 @@ struct SessionInboxView: View {
         }
     }
 
-    private func measurement(_ value: Double, unit: String) -> some View {
+    private func measurement(_ formatted: (value: String, unit: String)) -> some View {
         HStack(spacing: 2) {
-            Text(value, format: .number.locale(Locale(identifier: "id_ID")).precision(.fractionLength(1)))
-            Text(unit).foregroundStyle(.secondary)
+            Text(formatted.value)
+            Text(formatted.unit).foregroundStyle(.secondary)
         }
         .font(.data(12))
     }

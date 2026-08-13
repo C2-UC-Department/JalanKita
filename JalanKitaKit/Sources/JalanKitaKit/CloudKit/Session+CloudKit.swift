@@ -55,7 +55,7 @@ extension Session: CKRecordConvertible {
             date: Session.displayDate(recordedDate),
             surveyor: Surveyor(id: surveyorID, name: surveyorName),
             clipCount: clipCount,
-            duration: Session.displayDuration(durationSeconds),
+            duration: Session.formattedDuration(durationSeconds),
             distanceKm: distanceKm,
             gpsAccuracyM: record[CloudKitSchema.SessionField.gpsAccuracyM] as? Int,
             gpsHz: record[CloudKitSchema.SessionField.gpsHz] as? Double,
@@ -77,10 +77,4 @@ extension Session: CKRecordConvertible {
         return date.formatted(date: .abbreviated, time: .shortened)
     }
 
-    private static func displayDuration(_ seconds: Double?) -> String {
-        guard let seconds else { return "—" }
-        let total = Int(seconds)
-        let h = total / 3600, m = (total % 3600) / 60
-        return h > 0 ? "\(h) j \(m) m" : "\(m) m"
-    }
 }

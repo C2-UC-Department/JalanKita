@@ -232,7 +232,7 @@ struct ActiveRecordingView: View {
                 date: startedAt.formatted(date: .abbreviated, time: .shortened),
                 surveyor: Surveyor(id: model.surveyorName, name: model.surveyorName),
                 clipCount: clipURLs.count,
-                duration: formattedDuration(elapsed),
+                duration: Session.formattedDuration(elapsed),
                 distanceKm: location.distanceMeters / 1000,
                 gpsAccuracyM: location.lastAccuracyMeters.map { Int($0) },
                 gpsHz: location.pointCount > 0 && elapsed > 0 ? Double(location.pointCount) / elapsed : nil,
@@ -263,12 +263,6 @@ struct ActiveRecordingView: View {
             maxLatitude: latitudes.max() ?? 0,
             maxLongitude: longitudes.max() ?? 0
         )
-    }
-
-    private func formattedDuration(_ seconds: TimeInterval) -> String {
-        let total = Int(seconds)
-        let h = total / 3600, m = (total % 3600) / 60
-        return h > 0 ? "\(h) j \(m) m" : "\(m) m"
     }
 
     private func sessionSizeGB() -> Double {

@@ -463,6 +463,10 @@ final class AppModel {
     /// intentionally unused here — `startProcessing` reconstructs them
     /// later via `SessionVideoAssetBuilder`, from the same stable path
     /// `SyncedSessionIngestor` already wrote them to.
+    func session(withID id: Session.ID) -> Session? {
+        sessions.first(where: { $0.id == id })
+    }
+
     func ingestSyncedSession(_ session: Session, clipURLs: [URL], zoneID: CKRecordZone.ID) {
         if let index = sessions.firstIndex(where: { $0.id == session.id }) {
             sessions[index] = session

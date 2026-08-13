@@ -37,6 +37,16 @@ final class SyncedSessionIngestor: CloudKitIngestDelegate {
     }
 
     func didFetchSession(_ session: Session, zoneID: CKRecordZone.ID) {
+        // Already ingested once — its clip/GPS files are already durably
+        // on disk from that first ingest (see the type doc comment).
+        // CloudKit's change-token delta sync won't redeliver unchanged
+        // Clip/GPSTrack records, so restarting a buffer here would create
+        // one that can never complete, silently dropping this and every
+        // later update. Update the known session directly instead.
+        if appModel?.session(withID: session.id) != nil {
+            appModel?.ingestSyncedSession(session, clipURLs: [], zoneID: zoneID)
+            return
+        }
         var buffer = buffers[session.id] ?? Buffer()
         buffer.session = session
         buffer.zoneID = zoneID
