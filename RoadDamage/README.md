@@ -5,8 +5,18 @@ Third Python component of JalanKita, after `PythonWorker/` (photo → parking di
 PCI-informed condition score**, and it is what the *Peninjauan* screen calls when you use
 **"Analisis foto…"**.
 
-Per [ADR-015](../JOURNAL.md) this vertical ships **bounding boxes, not segmentation**. Don't add a
-segmentation model here — the measurements that killed that option are in the ADR.
+Per [ADR-015](../JOURNAL.md) the **findings are bounding boxes** — the detector decides whether
+there is damage, which class it is, and where. That has not changed, and a segmentation model must
+not be made to answer those questions: measured over 958 Surabaya frames it reports damage on
+**958 of them**, so it can never say "this road is clean".
+
+⚠️ Since [ADR-021](../JOURNAL.md) there *is* a second model here, and it answers exactly one
+question: **how much** of a box is really damage (`unet_extent.py` + `models/unet_resnet34.pt`).
+A box over-states a thin diagonal crack by construction — boxes drawn around hand-brushed ground
+truth reach only 24,48 % pixel precision. Constrained to a rectangle the detector already committed
+to, the segmenter is 83,77 % precise, against 13,45 % on its own. 🚫 Its output is **displayed,
+never scored**: `condition` and `deduct_*` stay box-derived until Stage 0 gains an extent column
+too (ADR-016 requires both stages to grade a frame identically).
 
 ---
 
@@ -69,18 +79,38 @@ predict, which is why the model load is wrapped in `redirect_stdout(sys.stderr)`
 
 | order | source |
 |---|---|
+| 0 | `Contents/Resources/roaddamage-worker/roaddamage-worker` — the frozen build, if staged |
 | 1 | `JALANKITA_ROAD_DAMAGE_PYTHON` — an explicit interpreter |
 | 2 | `JALANKITA_ROAD_DAMAGE_REPO`/`.venv/bin/python3` |
 | 3 | `RoadDamage/.venv/bin/python3` — the intended steady state |
 | 4 | `../test-road-damage-detection/.venv/bin/python3` — the sibling checkout |
 
-Tier 4 exists so the feature works on a dev machine that has already run the upstream detector
-project, without spending ~2 GB and several minutes on a fourth environment.
+Tier 0 goes first so a shipped app never prefers a developer's stray checkout; a dev machine has
+nothing staged and falls through unchanged. Tier 4 exists so the feature works on a machine that has
+already run the upstream detector project, without spending ~2 GB on a fourth environment.
 
-> 🚫 **There is no bundled/frozen tier, so an archived app cannot do live analysis.** `RoadDamage/`
-> has no `build_worker.sh`, exactly like `CarDetection/` ([`CLAUDE.md`](../CLAUDE.md) fact 13).
-> Peninjauan's **Stage 0** — the pre-computed dataset — still works in a distributed build; only
-> "Analisis foto…" does not. Adding PyInstaller here is the fix and it is not done.
+## The frozen build
+
+```bash
+./build_worker.sh          # ~20 min, ~900 MB in dist/. Only before archiving.
+```
+
+Produces `dist/roaddamage-worker/` (PyInstaller onedir, per ADR-003), which the "Stage RoadDamage"
+Xcode phase rsyncs into the bundle. **Not part of a normal Xcode build** — the phase warns and
+`exit 0`s when `dist/` is absent, so UI-only work still needs no Python toolchain. Until it is run,
+an archived app gets Peninjauan's Stage 0 (the pre-computed dataset needs no Python at all) and
+Stage 1 reports which paths it searched.
+
+> ⚠️ **`severity.yaml` must be in `datas`, and this is the trap.** `severity.py` resolves it as
+> `Path(__file__).parent / "severity.yaml"`, and PyInstaller relocates modules into `sys._MEIPASS` —
+> so the path a checkout resolves is not the path a frozen build resolves. `worker_main.py` routes
+> both the yaml and the checkpoint through `bundle_root()` for this reason. Neither of the repo's
+> other two specs has this wrinkle, so do not treat them as a complete model. Bundling the
+> checkpoint alone yields a worker that dies at startup.
+>
+> `severity.py` itself is **not** patched for this — it is a vendored copy and must stay
+> arithmetically identical to upstream. `from_yaml` already accepts an explicit path, so
+> `worker_main.py` passes one.
 
 ---
 

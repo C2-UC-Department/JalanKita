@@ -28,7 +28,7 @@ public enum CloudKitSchema {
     /// because CloudKit rejects a container the signing team doesn't own. That
     /// silent-failure mode is why this is called out here rather than left for
     /// whoever hits it to work out.
-    public static let containerIdentifier = "iCloud.com.ius.JalanKita"
+    public static let containerIdentifier = "iCloud.com.davin.JalanKita"
 
     public static func zoneName(surveyorID: String) -> String {
         "Surveyor-\(surveyorID)"

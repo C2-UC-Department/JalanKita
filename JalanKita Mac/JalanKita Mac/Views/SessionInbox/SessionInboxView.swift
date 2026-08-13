@@ -85,6 +85,25 @@ struct SessionInboxView: View {
                     Label("Unggah…", systemImage: "square.and.arrow.up")
                 }
             }
+            // Stage 3's cost controls, here rather than on the review screen
+            // because they have to be set BEFORE a run starts — both video entry
+            // points (Unggah Video and Proses) are on this screen.
+            ToolbarItem(placement: .automatic) {
+                Menu {
+                    Picker("Interval frame", selection: $model.roadDamageIntervalSeconds) {
+                        Text("1 detik — paling rapat, ~2,7× durasi klip").tag(1.0)
+                        Text("3 detik — ~0,9× durasi klip").tag(3.0)
+                        Text("5 detik — ~0,54× durasi klip").tag(5.0)
+                        Text("10 detik — paling cepat").tag(10.0)
+                    }
+                    Divider()
+                    Toggle("Lewati frame nyaris identik", isOn: $model.roadDamageSkipDuplicates)
+                } label: {
+                    Label("Kerusakan jalan", systemImage: "road.lanes")
+                }
+                .help("Interval sampling frame untuk deteksi kerusakan jalan. "
+                      + "Setiap frame memakan ~2,7 detik CPU.")
+            }
         }
         .fileImporter(isPresented: $showingPhotoImporter, allowedContentTypes: [.image]) { result in
             handlePhotoImport(result)

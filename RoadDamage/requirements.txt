@@ -9,5 +9,52 @@
 # they are not listed separately. On macOS (Apple Silicon) `pip install torch`
 # from the default PyPI index ships MPS-enabled wheels — no --index-url needed.
 
-ultralytics>=8.3.0     # YOLO11 detection
-pyyaml                 # severity.yaml
+# ⚠️ opencv-python is PINNED, and the pin is load-bearing. Read this before
+# relaxing it — it was found the hard way, by building the frozen worker and
+# noticing it disagreed with the dataset.
+#
+# worker_main.py's docstring pins `conf 0.20 / imgsz 1280` so a frame analysed
+# live lands on the same boxes as the same frame read from Stage 0's CSVs. That
+# pins the ARGUMENTS but not the libraries that consume them, and it is not
+# enough. A fresh venv built from this file's previous (unpinned) contents gave,
+# on IMG_0040_f000030_t0001000 — same checkpoint, same image, same conf/imgsz,
+# identical torch 2.13.0 / torchvision 0.28.0 / numpy 2.4.6 / pillow 12.3.0:
+#
+#   cv2 4.10.0   cx 0.855609  w 0.287967  conf 0.7424  deduct 11.987   <- per_box.csv
+#   cv2 5.0.0    cx 0.855594  w 0.287975  conf 0.7450  deduct 11.988
+#
+# OpenCV 5 decodes/resizes the frame slightly differently, the detector sees
+# slightly different pixels, and every downstream number moves. Pinning cv2 back
+# to 4.10.0.84 reproduces all seven published fields of both boxes EXACTLY.
+#
+# ⚠️ It was NOT ultralytics, which is the obvious suspect and the wrong one:
+# 8.4.98 and 8.4.117 produce byte-identical output when cv2 is held constant
+# (tested both ways). It is pinned below anyway — this is a numeric pipeline
+# whose whole contract is that two stages agree, and an unpinned floor has now
+# produced one surprise — but that pin is prophylaxis, not a measured fix.
+#
+# Why it matters even though `condition` still came out 50 here: that is luck.
+# A frame sitting near severity.yaml's 40 / 70 grade bands can cross one on a
+# third-decimal deduction, and then Stage 0 and Stage 1 grade the same road
+# differently — the exact failure ADR-016's "one severity implementation" rule
+# exists to prevent, arriving through the dependency graph rather than through
+# the arithmetic.
+#
+# Bump these ONLY together with a regeneration of both Stage 0 CSVs in
+# ../../test-road-damage-detection/ (they come from one invocation), the same way
+# ADR-016's Reversal describes for the checkpoint.
+opencv-python==4.10.0.84  # pixel-exact parity with per_box.csv — see above
+ultralytics==8.4.98       # YOLO11 detection
+pyyaml                    # severity.yaml
+
+# The extent model (`unet_extent.py`), per ADR-021: the detector's box says where and what, this
+# says how much of that box is actually damage. Pinned to an EXACT version, not a floor, for a
+# specific reason — `models/unet_resnet34.pt` was written by smp 0.5.0, and a different minor
+# version can rename decoder submodules. `load_model` uses `strict=True` so that mismatch is loud
+# rather than a network left half-random; the pin is what stops it arising at all.
+#
+# ✅ Verified 2026-08-13 that installing this does NOT disturb the parity pins above: pip reported
+# torch, opencv, numpy and ultralytics all "already satisfied", and cv2 stayed 4.10.0 afterwards.
+# It brings in `timm` plus huggingface-hub's HTTP stack. ⚠️ Nothing here reaches the network at
+# runtime — `unet_extent.build_model` passes `encoder_weights=None` precisely so it cannot.
+segmentation-models-pytorch==0.5.0
