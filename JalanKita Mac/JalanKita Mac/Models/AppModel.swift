@@ -19,14 +19,14 @@
 //  deliberately mirrors SessionInboxView.processBatch()'s existing pattern
 //  (flip a Session's status, then set `selection`) rather than inventing a
 //  second navigation mechanism. On success it lands on "Tinjauan Parkir"
-//  (parkingAnalyses), never Peninjauan (reviewQueue) — the two verticals stay
-//  separate all the way down, and the road-damage one is fed by
-//  `loadRoadDamageQueue()` / `analyzeRoadDamage(url:)` instead.
+//  (parkingAnalyses).
 //
-//  Peninjauan's queue is STATE, not a constant. It starts empty and is filled
-//  by a loader, so "0 dari 0" is a real thing the UI must render — the previous
-//  version stored a single always-present dummy frame with hardcoded 12/41
-//  counters, which meant the empty case had never once been exercised.
+//  A session lives in exactly one screen at a time, decided by its `status`:
+//  Sesi masuk holds everything not yet finished (including `.failed` /
+//  `.degraded`, which still need the operator to act), Antrean holds what is
+//  actively running (`status.isQueued`), and Laporan holds `.done`. That is
+//  why none of the three screens filter on anything but status — there is no
+//  second source of truth for "where does this session belong."
 //
 
 import AppKit
@@ -51,40 +51,6 @@ final class AppModel {
         didSet { Self.saveSessions(sessions) }
     }
     var segments: [SegmentResult] = SampleData.segments
-
-    /// Peninjauan's review queue — real detector output, loaded from disk by
-    /// `RoadDamageDataset`. Empty until `loadRoadDamageQueue()` runs (and stays
-    /// empty if the dataset isn't present), so every consumer must handle zero
-    /// frames. Position in this array IS the queue counter; nothing stores one.
-    var reviewQueue: [ReviewFrame] = []
-
-    /// Which frame the reviewer is on. Held as an id rather than an index so a
-    /// reload that changes the queue's length can't silently point at a
-    /// different frame than the one that was on screen.
-    var reviewSelectionID: ReviewFrame.ID?
-
-    /// Set when the queue includes frames the detector found nothing in. Off by
-    /// default: 722 of 958 real frames are clean, and paging through them is not
-    /// a review workflow. Toggleable from Peninjauan so the clean-frame render
-    /// path stays exercisable at runtime.
-    var reviewIncludesCleanFrames: Bool = false
-
-    /// Non-fatal problems from the last queue load — surfaced in the log rather
-    /// than thrown away, per the app's "degrade, don't die" rule.
-    var reviewLoadWarnings: [String] = []
-
-    var reviewFrame: ReviewFrame? {
-        guard let reviewSelectionID else { return reviewQueue.first }
-        return reviewQueue.first { $0.id == reviewSelectionID } ?? reviewQueue.first
-    }
-
-    /// 1-based position of the current frame, or nil when the queue is empty.
-    /// Derived on every read — this is what replaced the hardcoded "12 dari 41".
-    var reviewQueuePosition: Int? {
-        guard let frame = reviewFrame,
-              let index = reviewQueue.firstIndex(where: { $0.id == frame.id }) else { return nil }
-        return index + 1
-    }
 
     /// Real parking-disturbance results, keyed by session id — "Tinjauan
     /// Parkir"'s data. A single manual photo upload produces exactly one
@@ -111,29 +77,54 @@ final class AppModel {
         didSet { Self.saveLogLines(logLines) }
     }
 
-    /// Findings the reviewer has already accepted/rejected this session,
-    /// keyed by Finding.id — drives the review workflow's progress badge.
-    var reviewedFindingIDs: Set<String> = []
+    /// Live timing for the sessions currently running, keyed by session id.
+    ///
+    /// Deliberately NOT persisted, unlike `pipelineSteps`/`logLines`: a clock
+    /// restored from disk after a relaunch would describe a worker process that
+    /// no longer exists, and would report a multi-hour "elapsed" for a run that
+    /// died with the app. An entry exists only while the session is queued —
+    /// `updateSessionStatus` creates it on entry and drops it on exit.
+    var processingClocks: [Session.ID: ProcessingClock] = [:]
+
+    /// How long the worker may go silent before Antrean calls it stuck.
+    ///
+    /// Grounded in the worker's measured behaviour, not picked round: v13 prints
+    /// progress only every 50 frames (`pipeline_v13.py`), and at the ~0.78 s per
+    /// frame the profiled `--deterministic` CPU path actually runs at, that is a
+    /// normal gap of ~39 s between lines. Startup is quieter still — loading
+    /// YOLO, the sign detector, YOLOP and MiDaS takes ~80 s during which the
+    /// worker says nothing at all. Anything under ~2 minutes would therefore
+    /// flag healthy runs; 3 minutes clears both with margin while still
+    /// noticing a real hang within one screen-refresh of it mattering.
+    static let stallThreshold: TimeInterval = 180
+
+    /// Timing for one in-flight session, assembled from worker progress events.
+    struct ProcessingClock: Equatable {
+        /// When the operator started it. Includes worker startup, so this is
+        /// what "sudah berjalan berapa lama" should show.
+        var startedAt: Date
+
+        /// Last time the worker produced *any* output. Stall detection reads
+        /// only this — a worker that is loading models is silent but healthy,
+        /// which is exactly why the threshold above is measured, not guessed.
+        var lastProgressAt: Date
+
+        /// The first frame-level progress event, and the fraction it reported.
+        ///
+        /// ETA is measured from here rather than from `startedAt` on purpose:
+        /// the ~80 s of model loading that precedes the first frame is a fixed
+        /// startup cost, not something proportional to the frames that follow.
+        /// Averaging it into the rate makes every early estimate wildly
+        /// pessimistic — at 10% done it would roughly double the projection.
+        var firstFrameAt: Date?
+        var firstFraction: Double = 0
+
+        /// Most recent frame-level fraction in 0...1.
+        var fraction: Double = 0
+    }
 
     private let inferenceService = InferenceService.shared
     private let carDetectionService = CarDetectionService.shared
-    private let roadDamageService = RoadDamageService.shared
-
-    /// True while a live road-damage analysis is running, so Peninjauan can
-    /// disable its upload action instead of queueing a second request behind the
-    /// first (the worker handles one at a time).
-    var isAnalyzingRoadDamage: Bool = false
-
-    /// The reason the last live road-damage analysis failed, or nil.
-    ///
-    /// The log line alone was not enough. `analyzeRoadDamage` deliberately treats
-    /// a worker failure as non-fatal and only appended to `logLines` — but the log
-    /// console lives on a DIFFERENT screen (Antrean), so from Peninjauan a failed
-    /// analysis was indistinguishable from one that never started. The most likely
-    /// failure by far is "no `.venv` on this machine", which must be legible where
-    /// the reviewer actually is. Set alongside the log line, never instead of it:
-    /// the log stays the durable record, this is the transient alert.
-    var roadDamageError: String?
 
     let cloudKitSyncEngine: CloudKitSyncEngine
     private let syncedSessionIngestor: SyncedSessionIngestor
@@ -172,9 +163,6 @@ final class AppModel {
         }
         carDetectionService.onProgress = { [weak self] progress in
             self?.applyCarDetectionProgress(progress)
-        }
-        roadDamageService.onProgress = { [weak self] line in
-            self?.applyRoadDamageProgress(line)
         }
 
         syncedSessionIngestor.appModel = self
@@ -235,17 +223,26 @@ final class AppModel {
         sessions.filter(\.status.isQueued)
     }
 
-    var batchSelectedCount: Int {
-        sessions.filter(\.selectedForBatch).count
+    /// What Sesi masuk shows: everything that still needs the operator, which is
+    /// every session that isn't `.done`.
+    ///
+    /// `.failed` and `.degraded` deliberately stay here rather than moving to
+    /// Laporan with the finished work. They have been through the pipeline, but
+    /// the thing the operator has to do next — start them again — only exists on
+    /// this screen, so filing them under "finished" would leave a session with a
+    /// pending action in a screen that has no way to act on it.
+    var inboxSessions: [Session] {
+        sessions.filter { $0.status != .done }
     }
 
-    /// Findings across the whole queue that nobody has accepted or rejected yet.
-    /// Counted from the queue's actual contents — it used to be `41 - reviewed`,
-    /// with 41 being a number no data ever produced.
-    var unreviewedFindingsCount: Int {
-        reviewQueue.reduce(0) { total, frame in
-            total + frame.findings.filter { !reviewedFindingIDs.contains($0.id) }.count
-        }
+    /// What Laporan shows: finished work only. Ordering is the view's business
+    /// (ReportsView sorts by its own `sortOrder`), not fixed here.
+    var reportSessions: [Session] {
+        sessions.filter { $0.status == .done }
+    }
+
+    var batchSelectedCount: Int {
+        sessions.filter(\.selectedForBatch).count
     }
 
     var surveyorCount: Int {
@@ -290,135 +287,16 @@ final class AppModel {
         sessions[index].selectedForBatch.toggle()
     }
 
-    // MARK: - Peninjauan (road damage)
-
-    /// Fills the review queue from the detector output already on disk.
+    /// Reap the warm disturbance worker on app quit — called from ContentView's
+    /// `willTerminate` hook.
     ///
-    /// Synchronous on purpose: three CSVs totalling well under a megabyte, parsed
-    /// once when the screen appears. Wrapping this in a Task would add a window
-    /// where the view renders an empty queue that is about to become non-empty —
-    /// a flash of the "tidak ada antrean" state for data that was always there.
-    ///
-    /// A missing dataset is NOT an error state: the queue simply stays empty and
-    /// the reason lands in the log. UI-only work must not require the sibling
-    /// checkout, same principle as the Python toolchain rule.
-    func loadRoadDamageQueue() {
-        do {
-            let result = try RoadDamageDataset.load(includeClean: reviewIncludesCleanFrames)
-            reviewQueue = result.frames
-            reviewLoadWarnings = result.warnings
-
-            // Keep the reviewer where they were if that frame survived the reload
-            // (toggling clean frames on and off is the common case).
-            if let current = reviewSelectionID, result.frames.contains(where: { $0.id == current }) {
-                reviewSelectionID = current
-            } else {
-                reviewSelectionID = result.frames.first?.id
-            }
-
-            for warning in result.warnings {
-                appendLog(warning, isWarning: true)
-            }
-            appendLog("Antrean peninjauan dimuat: \(result.frames.count) frame dari "
-                      + "\(result.totalFramesInDataset) (\(result.cleanFrameCount) tanpa temuan).",
-                      isWarning: false)
-        } catch {
-            reviewQueue = []
-            reviewSelectionID = nil
-            reviewLoadWarnings = [error.localizedDescription]
-            appendLog(error.localizedDescription, isWarning: true)
-        }
-    }
-
-    func setReviewIncludesCleanFrames(_ includeClean: Bool) {
-        guard includeClean != reviewIncludesCleanFrames else { return }
-        reviewIncludesCleanFrames = includeClean
-        loadRoadDamageQueue()
-    }
-
-    func selectReviewFrame(id: ReviewFrame.ID) {
-        guard reviewQueue.contains(where: { $0.id == id }) else { return }
-        reviewSelectionID = id
-    }
-
-    /// Steps the queue by `offset`, clamped at both ends — no wraparound, so the
-    /// reviewer can tell when they've reached the end of the work.
-    func stepReviewFrame(by offset: Int) {
-        guard !reviewQueue.isEmpty,
-              let current = reviewQueuePosition else { return }
-        let target = min(max(current - 1 + offset, 0), reviewQueue.count - 1)
-        reviewSelectionID = reviewQueue[target].id
-    }
-
-    /// Stage 1: run the detector live on a photo and put the result at the FRONT
-    /// of the review queue.
-    ///
-    /// Front, not back, because the reviewer just chose this image and expects to
-    /// land on it. Re-analysing the same file replaces its existing entry rather
-    /// than adding a duplicate — `ReviewFrame.id` is the filename stem for exactly
-    /// that reason.
-    ///
-    /// A failure is never fatal: the queue keeps whatever it already had, the
-    /// reason goes to the log *and* to `roadDamageError` for an alert on the
-    /// screen the reviewer is actually looking at, and the screen stays usable.
-    /// That matters more here than in the other verticals, because the most likely
-    /// failure is "no worker venv on this machine", which must not look like a
-    /// broken app — nor, as it did before `roadDamageError` existed, like nothing
-    /// happened at all.
-    func analyzeRoadDamage(url: URL) {
-        guard !isAnalyzingRoadDamage else { return }
-        isAnalyzingRoadDamage = true
-        roadDamageError = nil
-        appendLog("Menganalisis kerusakan jalan: \(url.lastPathComponent)…", isWarning: false)
-
-        Task {
-            defer { isAnalyzingRoadDamage = false }
-            do {
-                let frame = try await roadDamageService.analyze(imageURL: url)
-                reviewQueue.removeAll { $0.id == frame.id }
-                reviewQueue.insert(frame, at: 0)
-                reviewSelectionID = frame.id
-                selection = .review
-                appendLog("Selesai: \(frame.findings.count) temuan · skor \(frame.score) "
-                          + "(\(frame.severity.label)) pada \(url.lastPathComponent).",
-                          isWarning: false)
-            } catch {
-                appendLog(error.localizedDescription, isWarning: true)
-                roadDamageError = error.localizedDescription
-            }
-        }
-    }
-
-    /// Worker stderr -> log. Progress events are folded into a single line per
-    /// stage rather than replayed verbatim: this pipeline has two stages and
-    /// finishes in seconds, so a step-by-step tracker would be more chrome than
-    /// information (the video path, which takes minutes, earns one).
-    private func applyRoadDamageProgress(_ line: RoadDamageStderrLine) {
-        switch line {
-        case .event(let event):
-            if event.type == "error", let error = event.error {
-                appendLog("Worker kerusakan jalan: \(error)", isWarning: true)
-            } else if event.type == "progress", event.state == "done", let stage = event.stage {
-                appendLog("Tahap \(stage) selesai.", isWarning: false)
-            }
-        case .raw(let text):
-            // Only surface the worker's own tagged lines; Ultralytics chatter and
-            // torch warnings would otherwise flood the log.
-            if text.hasPrefix("[warn]") || text.hasPrefix("[ok]") || text.hasPrefix("[device]") {
-                appendLog(text, isWarning: text.hasPrefix("[warn]"))
-            }
-        }
-    }
-
+    /// `InferenceService.shutdown()` has existed since that worker was made warm
+    /// but never had a caller (the gap CLAUDE.md fact 14 records). This hook used
+    /// to reap the road-damage worker instead; with Peninjauan removed, it now
+    /// serves the service that actually still leaves a child Python process
+    /// behind.
     func shutdownServices() async {
-        await roadDamageService.shutdown()
-    }
-
-    private func appendLog(_ message: String, isWarning: Bool) {
-        logLines.insert(LogLine(time: Self.logTimeFormatter.string(from: Date()),
-                                message: message,
-                                isWarning: isWarning),
-                        at: 0)
+        await inferenceService.shutdown()
     }
 
     /// Called from Session Inbox's "Unggah…" toolbar menu.
@@ -825,6 +703,20 @@ final class AppModel {
         guard let activeUploadSessionID, pipelineSteps[activeUploadSessionID]?.isEmpty == false else { return }
         pipelineSteps[activeUploadSessionID]?[0].subProgress = progress.fraction
         pipelineSteps[activeUploadSessionID]?[0].detail = "\(progress.framesDone)/\(progress.framesTotal) frame"
+
+        // Frame-level progress is the only signal fine-grained enough to project
+        // an ETA from; the step-count progress `updateQueueProgress` computes
+        // moves a handful of times per run. The first such event also marks the
+        // end of model loading, which is where ETA measurement starts.
+        if var clock = processingClocks[activeUploadSessionID] {
+            if clock.firstFrameAt == nil {
+                clock.firstFrameAt = Date()
+                clock.firstFraction = progress.fraction
+            }
+            clock.fraction = progress.fraction
+            processingClocks[activeUploadSessionID] = clock
+        }
+
         updateQueueProgress()
     }
 
@@ -1023,8 +915,14 @@ final class AppModel {
     }
 
     private func updateQueueProgress() {
-        guard let activeUploadSessionID,
-              let index = sessions.firstIndex(where: { $0.id == activeUploadSessionID }),
+        guard let activeUploadSessionID else { return }
+        // Any worker output at all counts as a heartbeat — both progress paths
+        // (`applyProgress` for the disturbance worker, `applyCarDetectionProgress`
+        // for v13) funnel through here, so this is the one place stall detection
+        // has to be wired into.
+        processingClocks[activeUploadSessionID]?.lastProgressAt = Date()
+
+        guard let index = sessions.firstIndex(where: { $0.id == activeUploadSessionID }),
               case .segmenting = sessions[index].status,
               let steps = pipelineSteps[activeUploadSessionID]
         else { return }
@@ -1033,9 +931,58 @@ final class AppModel {
         sessions[index].status = .segmenting(progress: progress)
     }
 
+    /// The single funnel for session status changes — which is why the
+    /// processing clock's whole lifecycle hangs off it rather than being
+    /// started and stopped by hand at each call site.
     private func updateSessionStatus(_ sessionID: String, _ status: SessionStatus) {
         guard let index = sessions.firstIndex(where: { $0.id == sessionID }) else { return }
         sessions[index].status = status
+
+        if status.isQueued {
+            if processingClocks[sessionID] == nil {
+                let now = Date()
+                processingClocks[sessionID] = ProcessingClock(startedAt: now, lastProgressAt: now)
+            }
+        } else {
+            processingClocks[sessionID] = nil
+        }
+    }
+
+    // MARK: - Antrean timing
+
+    /// How long this session has been running, or nil if it isn't.
+    func elapsed(for sessionID: Session.ID, now: Date = Date()) -> TimeInterval? {
+        guard let clock = processingClocks[sessionID] else { return nil }
+        return now.timeIntervalSince(clock.startedAt)
+    }
+
+    /// Projected time left, or nil while there isn't yet enough to project from.
+    ///
+    /// Returns nil rather than a guess in three cases: no clock, no frame-level
+    /// progress yet (still loading models), or no measurable forward movement
+    /// since the first frame event. A missing ETA reads honestly as "not known
+    /// yet"; a fabricated one reads as information.
+    func estimatedRemaining(for sessionID: Session.ID, now: Date = Date()) -> TimeInterval? {
+        guard let clock = processingClocks[sessionID],
+              let firstFrameAt = clock.firstFrameAt else { return nil }
+        let progressed = clock.fraction - clock.firstFraction
+        let span = now.timeIntervalSince(firstFrameAt)
+        guard progressed > 0.001, span > 0 else { return nil }
+        let rate = progressed / span
+        let remaining = (1 - clock.fraction) / rate
+        return remaining.isFinite && remaining >= 0 ? remaining : nil
+    }
+
+    /// True when the worker has said nothing for longer than `stallThreshold`.
+    func isStalled(_ sessionID: Session.ID, now: Date = Date()) -> Bool {
+        guard let clock = processingClocks[sessionID] else { return false }
+        return now.timeIntervalSince(clock.lastProgressAt) > Self.stallThreshold
+    }
+
+    /// Seconds since the last sign of life — what the stall warning shows.
+    func silentFor(_ sessionID: Session.ID, now: Date = Date()) -> TimeInterval? {
+        guard let clock = processingClocks[sessionID] else { return nil }
+        return now.timeIntervalSince(clock.lastProgressAt)
     }
 
     private static func probeDurationSeconds(url: URL) async -> Double? {

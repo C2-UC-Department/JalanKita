@@ -51,9 +51,9 @@ struct SidebarView: View {
         switch section {
         case .sessionInbox: model.batchSelectedCount
         case .queue: model.queuedSessions.count
-        case .review: model.unreviewedFindingsCount
+        case .reports: model.doneSessionsCount
         case .surveyors: model.surveyorCount
-        case .mapSegments, .reports, .calibration, .cloudSync: 0
+        case .mapSegments, .calibration, .cloudSync: 0
         }
     }
 }

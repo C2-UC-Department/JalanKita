@@ -2,12 +2,11 @@
 //  SampleData.swift
 //  JalanKita Mac
 //
-//  Mock road-segment data standing in for the real road-damage
-//  segmentation pipeline, which doesn't exist yet — Peninjauan/Peta &
-//  segmen stay entirely sample-driven until it does (see MapSegmentsView,
-//  ReviewFindingsView/DummySegmentation). Sessions, pipeline steps, and log
-//  lines used to live here too; those are gone now that Sesi Masuk/Antrean
-//  run on real synced/uploaded data with nothing left to fall back to.
+//  Mock road-segment data standing in for a real road-segmentation pipeline,
+//  which doesn't exist yet — Peta & segmen stays entirely sample-driven until
+//  it does (see MapSegmentsView). Sessions, pipeline steps, and log lines used
+//  to live here too; those are gone now that Sesi masuk/Antrean/Laporan run on
+//  real synced/uploaded data with nothing left to fall back to.
 //
 
 import Foundation

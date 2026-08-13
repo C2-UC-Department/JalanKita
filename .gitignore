@@ -17,3 +17,16 @@ PROGRESS.md
 ROAD_DAMAGE_BRIEF.md
 .claude
 .DS_Store
+
+# Per-user Xcode state: window layout, scroll positions, breakpoints, which
+# scheme this particular Mac last selected. Xcode rewrites it constantly, so
+# tracked it shows up as a change on every single open and conflicts between
+# collaborators for no reason — three people's copies (biru, davindjayadi,
+# ignatiusiba) had accumulated in here before this rule existed.
+#
+# Only `xcuserdata/` is per-user. `xcshareddata/` is NOT ignored on purpose:
+# shared schemes live there and are meant to be committed, which is what lets
+# a fresh clone build "JalanKita Mac" / "JalanKita iOS" without hand-creating
+# a scheme first.
+xcuserdata/
+*.xcuserstate

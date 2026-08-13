@@ -17,7 +17,18 @@
 import Foundation
 
 public enum CloudKitSchema {
-    public static let containerIdentifier = "iCloud.com.biru.JalanKita"
+    /// ⚠️ Tied to ONE Apple Developer account. Anyone building this on a
+    /// different account has to change it, along with three other places that
+    /// must all agree — see SETUP.md in the repo root for the full list.
+    ///
+    /// An iCloud container is namespaced to the team that owns it, so this
+    /// string cannot be shared the way the rest of this file's constants are.
+    /// Leaving it pointing at someone else's container does NOT fail at build
+    /// time: the app compiles, launches, and then quietly syncs nothing,
+    /// because CloudKit rejects a container the signing team doesn't own. That
+    /// silent-failure mode is why this is called out here rather than left for
+    /// whoever hits it to work out.
+    public static let containerIdentifier = "iCloud.com.ius.JalanKita"
 
     public static func zoneName(surveyorID: String) -> String {
         "Surveyor-\(surveyorID)"

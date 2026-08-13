@@ -26,10 +26,13 @@ struct SessionInboxView: View {
     @State private var importError: String?
     @State private var pendingDeletionID: Session.ID?
 
+    /// Sourced from `model.inboxSessions`, not `model.sessions` — a finished
+    /// session belongs to Laporan and must not also appear here, or the two
+    /// screens disagree about where a session lives.
     private var filteredSessions: [Session] {
         let base = searchText.isEmpty
-            ? model.sessions
-            : model.sessions.filter {
+            ? model.inboxSessions
+            : model.inboxSessions.filter {
                 $0.roadName.localizedCaseInsensitiveContains(searchText) ||
                 $0.surveyor.name.localizedCaseInsensitiveContains(searchText)
             }
@@ -37,15 +40,18 @@ struct SessionInboxView: View {
     }
 
     private var selectedSession: Session? {
-        model.sessions.first { $0.id == selection }
+        model.inboxSessions.first { $0.id == selection }
     }
 
     var body: some View {
         Group {
-            if model.sessions.isEmpty {
+            if model.inboxSessions.isEmpty {
                 ContentUnavailableView(
-                    "Belum ada sesi", systemImage: "tray",
-                    description: Text("Sesi akan muncul di sini setelah surveyor menyinkronkan rekaman dari iPhone, atau unggah foto/video secara manual lewat menu \"Unggah…\" di atas.")
+                    model.reportSessions.isEmpty ? "Belum ada sesi" : "Semua sesi sudah diproses",
+                    systemImage: model.reportSessions.isEmpty ? "tray" : "checkmark.circle",
+                    description: Text(model.reportSessions.isEmpty
+                        ? "Sesi akan muncul di sini setelah surveyor menyinkronkan rekaman dari iPhone, atau unggah foto/video secara manual lewat menu \"Unggah…\" di atas."
+                        : "Tidak ada yang menunggu diproses. \(model.reportSessions.count) sesi yang sudah selesai ada di Laporan.")
                 )
             } else {
                 HSplitView {
@@ -61,7 +67,7 @@ struct SessionInboxView: View {
         }
         .searchable(text: $searchText, placement: .toolbar, prompt: "Cari jalan atau surveyor")
         .navigationTitle("Sesi masuk")
-        .navigationSubtitle("\(model.newSessionsCount) baru · \(formattedGB(model.totalSizeGB)) GB total")
+        .navigationSubtitle("\(model.inboxSessions.count) belum diproses · \(model.newSessionsCount) siap · \(formattedGB(model.totalSizeGB)) GB total")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
