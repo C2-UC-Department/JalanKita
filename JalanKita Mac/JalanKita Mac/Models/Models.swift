@@ -62,6 +62,18 @@ struct Finding: Identifiable, Hashable {
     var defectType: DefectType
     var areaSqm: Double?
     var percentOfSurface: Double?
+
+    /// Percentage of the frame a segmentation model calls damage *inside this
+    /// finding's box* — the same unit as `percentOfSurface`, so the two can sit
+    /// side by side.
+    ///
+    /// `percentOfSurface` is the box's own footprint, which over-states a thin
+    /// diagonal crack by construction. This is the measured extent. 🚫 It does not
+    /// feed the condition score: severity is still computed in Python from box
+    /// area, and Stage 0 has no extent column, so making this authoritative means
+    /// moving both stages together (ADR-021). Defaults to nil — Stage 0 findings
+    /// and every mock in `SampleData` simply do not have one.
+    var extentPercent: Double? = nil
     var vehicleNote: String?
 
     /// Detector confidence, or nil when the source didn't record one.
@@ -82,10 +94,63 @@ struct Finding: Identifiable, Hashable {
     var frameRect: CGRect
 }
 
+/// One row of the severity arithmetic, straight from Python's
+/// `effective_deductions()`. Signed — always negative in practice.
+///
+/// `points` is a `Double`, and that is load-bearing rather than fussy. It used to
+/// be `Int`, built with `-Int(deduct_effective.rounded())`, which threw away the
+/// fraction at construction while the published `condition` came from Python's
+/// sum of the UNROUNDED values. Measured over the real Stage 0 CSVs, the rows
+/// then failed to add up to the total on **27 of the 236 damaged frames** — 14 low
+/// by a point, 13 high, and never by more than one. For example
+/// `IMG_0044_f000390_t0013000`: rows 5.854 / 7.741 / 4.682 / 39.682 rendered as
+/// −6 −8 −5 −40 = 59, so the panel showed 41 where Python had published 42. Carry
+/// the full precision and round only for display, at one decimal, and every one
+/// of those closes — verified by replaying all 958 frames through the panel's
+/// arithmetic, 0 remaining.
 struct SeverityDeduction: Identifiable, Hashable {
     let id = UUID()
     let label: String
-    let points: Int
+    let points: Double
+}
+
+/// A reviewer's verdict on one `Finding`.
+///
+/// Two cases, not a `Bool` and not a `Set` of "seen" ids, because Terima and Tolak
+/// mean opposite things and the panel used to record them identically — both
+/// buttons called the same `decide()` and both rendered the same green checkmark,
+/// while the footer copy promised rejections were being collected. Whatever the
+/// storage, the distinction has to survive it.
+enum ReviewDecision: Hashable {
+    case accepted
+    case rejected
+}
+
+/// Peninjauan's status filter. Lives here rather than inside the sidebar that
+/// draws it because `AppModel` owns the selection and does the filtering — the
+/// previous version was a `private enum` bound to view-local `@State`, which is
+/// precisely why picking a row changed nothing.
+///
+/// `all` is the default and is a new case. With only the original three, the
+/// natural default (`unseen`) would make every frame vanish the moment the
+/// reviewer decided on it — a behaviour change wearing a bug fix's clothes.
+enum ReviewStatusFilter: String, CaseIterable, Identifiable {
+    case all = "Semua"
+    case unseen = "Belum dilihat"
+    case accepted = "Terverifikasi"
+    case rejected = "Ditolak"
+
+    var id: String { rawValue }
+
+    /// Does a finding with this decision belong under this filter?
+    func matches(_ decision: ReviewDecision?) -> Bool {
+        switch self {
+        case .all: true
+        case .unseen: decision == nil
+        case .accepted: decision == .accepted
+        case .rejected: decision == .rejected
+        }
+    }
 }
 
 /// A reviewed frame: the unit of work on the Peninjauan Temuan screen. Real
@@ -118,6 +183,18 @@ struct ReviewFrame: Identifiable, Hashable {
     /// against Indonesian box labels — see the domain-gap caveat in ADR-015.
     let isProvisional: Bool
 
+    /// The human-readable provenance caveat that belongs beside this frame's score.
+    ///
+    /// Per-frame rather than per-screen, because the queue genuinely mixes sources:
+    /// `analyzeRoadDamage` inserts a live Stage 1 result at index 0 of a queue
+    /// otherwise full of Stage 0 rows, so a banner at the top of the screen would
+    /// caveat the wrong frames. It reaches Stage 1 straight off the wire
+    /// (`RoadDamageResponse.warnings`) and Stage 0 from the mirrored constant, so a
+    /// reviewer never has to know which path produced what they are looking at.
+    ///
+    /// `isProvisional` is the alarm; this is the reason. The two travel together.
+    let warnings: String?
+
     /// nil until a GPS log exists; segment/km binning needs one (severity.yaml's
     /// `segment_length_m` is unreachable without it).
     let segmentLabel: String?
@@ -127,10 +204,26 @@ struct ReviewFrame: Identifiable, Hashable {
 
     let findings: [Finding]
 
-    /// `startScore` minus `deductions` lands exactly on `score`, because both
-    /// come from Python: `effective_deductions()` is the per-box split of the
-    /// same sum `grade_segment()` turns into `condition`. Nothing is recomputed
-    /// in Swift — the two implementations used to disagree (ADR-016).
+    /// `startScore` minus `deductions` lands on `score` — ALMOST. Both come from
+    /// Python (`effective_deductions()` is the per-box split of the same sum
+    /// `grade_segment()` turns into `condition`) and nothing is recomputed in
+    /// Swift, which is what ADR-016 settled. But two things sit between the sum
+    /// and the published number, and the panel has to show both or it prints an
+    /// equation that does not balance:
+    ///
+    /// - Python rounds the total once (`int(round(100.0 - total))`), so a residual
+    ///   of up to ±0,5 is expected and self-evident from the subtotal on screen.
+    /// - Python then CLAMPS to `[2, 98]` (`severity.py:163`, a literal there and
+    ///   deliberately not in `severity.yaml`). That bites hard at the top: a frame
+    ///   with no defects at all scores 98, not 100 — which is 722 of the 958 real
+    ///   Surabaya frames — and once at the bottom, on `IMG_0044_f000540_t0018000`,
+    ///   whose deductions sum to 98,46 and would otherwise score 1,54.
+    ///
+    /// `startScore` stays 100 because 100 is genuinely where `100.0 - total`
+    /// starts; the 98 is a ceiling applied afterwards. The clamp is rendered as
+    /// its own row instead (see `ReviewFindingsPanel`), which is the only place it
+    /// can go without either lying about the start or duplicating Python's bounds
+    /// in Swift.
     let startScore: Int
     let deductions: [SeverityDeduction]
 

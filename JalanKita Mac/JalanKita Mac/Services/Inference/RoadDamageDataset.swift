@@ -253,6 +253,11 @@ enum RoadDamageDataset {
             // labels exist to validate it against. Every score stays provisional
             // until that measurement exists (ADR-015's domain-gap caveat).
             isProvisional: true,
+            // The CSVs carry no warnings column, so the constant stands in — the
+            // caveat belongs to the detector that produced them, not to the
+            // transport. See RoadDamageResponse.domainGapCaveat for why the Swift
+            // copy lives next to the wire field rather than here.
+            warnings: RoadDamageResponse.domainGapCaveat,
             segmentLabel: nil,
             kmMarker: nil,
             coordinate: nil,
@@ -266,9 +271,12 @@ enum RoadDamageDataset {
         )
     }
 
-    /// One row per detection, straight from `deduct_effective`. These sum to
-    /// `100 − condition`, so the panel's arithmetic closes without Swift ever
-    /// scoring anything itself.
+    /// One row per detection, straight from `deduct_effective` and UNROUNDED.
+    ///
+    /// The rounding used to happen right here (`-Int(effective.rounded())`) and
+    /// that is what stopped the panel's arithmetic closing on 27 of the 236
+    /// damaged frames — see `SeverityDeduction`'s own comment for the measurement.
+    /// Rounding is a display concern; the model layer carries what Python sent.
     private static func deductions(boxes: [[String: String]],
                                    findings: [Finding]) -> [SeverityDeduction] {
         zip(boxes, findings).compactMap { box, finding in
@@ -283,7 +291,7 @@ enum RoadDamageDataset {
             if inWheelpath { label += " · di jalur roda" }
             if isRepeat { label += " · pengulangan kelas" }
 
-            return SeverityDeduction(label: label, points: -Int(effective.rounded()))
+            return SeverityDeduction(label: label, points: -effective)
         }
     }
 
@@ -309,18 +317,18 @@ enum RoadDamageDataset {
     // MARK: - Filename fallbacks (used only when provenance is missing)
 
     /// Stems look like `IMG_0040_f000030_t0001000` — clip, frame index, ms timestamp.
-    private static func sourceClip(fromStem stem: String) -> String {
+    static func sourceClip(fromStem stem: String) -> String {
         let parts = stem.split(separator: "_")
         return parts.count >= 2 ? parts[0...1].joined(separator: "_") : stem
     }
 
-    private static func frameIndex(fromStem stem: String) -> String {
+    static func frameIndex(fromStem stem: String) -> String {
         guard let field = stem.split(separator: "_").first(where: { $0.hasPrefix("f") }),
               let value = Int(field.dropFirst()) else { return "—" }
         return String(value)
     }
 
-    private static func timecode(seconds: Double?, stem: String) -> String {
+    static func timecode(seconds: Double?, stem: String) -> String {
         let total: Double
         if let seconds {
             total = seconds

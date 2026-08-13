@@ -27,6 +27,11 @@ enum RoadDamageWorkerError: Error, LocalizedError {
     case workerTerminated(status: Int32)
     case requestFailed(String)
 
+    /// The worker accepted a request (or a launch) and never answered. Names the
+    /// likely cause and the recovery, the way `workerNotFound` does — a bare
+    /// "timed out" tells the reviewer nothing they can act on.
+    case timedOut(seconds: Int, duringStart: Bool)
+
     var errorDescription: String? {
         switch self {
         case .workerNotFound(let searched):
@@ -39,6 +44,12 @@ enum RoadDamageWorkerError: Error, LocalizedError {
             "Worker kerusakan jalan berhenti tak terduga (kode \(status))."
         case .requestFailed(let message):
             message
+        case .timedOut(let seconds, let duringStart):
+            duringStart
+                ? "Worker kerusakan jalan tidak siap dalam \(seconds) detik dan dihentikan. "
+                    + "Kemungkinan pemuatan model tertahan; coba unggah foto lagi."
+                : "Worker kerusakan jalan tidak merespons dalam \(seconds) detik dan "
+                    + "dimulai ulang. Coba unggah foto itu lagi."
         }
     }
 }
@@ -146,6 +157,26 @@ actor RoadDamageWorkerProcess {
                     RoadDamageWorkerError.launchFailed(error.localizedDescription))
             }
         }
+    }
+
+    /// Gives up on one in-flight request, failing its caller instead of leaving it
+    /// parked forever.
+    ///
+    /// Needed because `send`'s continuation is only ever resumed by a matching
+    /// response line — a worker that accepts a request and then wedges resumes
+    /// nothing, and the caller's `defer { isAnalyzingRoadDamage = false }` never
+    /// runs, so Peninjauan's toolbar shows "Menganalisis…" until the app quits.
+    ///
+    /// Actor-isolated on purpose: `RoadDamageService` drives this from a detached
+    /// timer, and `pending` must only ever be touched from inside the actor. That
+    /// isolation is the reason the service uses a plain timer Task rather than a
+    /// `withThrowingTaskGroup` race — a group's child task is non-isolated, and
+    /// mutating `pending` from one would be the bug the deadline was added to fix.
+    ///
+    /// No-op when the request already answered, which is the common race.
+    func abandon(requestID: String, afterSeconds seconds: Int) {
+        pending.removeValue(forKey: requestID)?
+            .resume(throwing: RoadDamageWorkerError.timedOut(seconds: seconds, duringStart: false))
     }
 
     func stop() {

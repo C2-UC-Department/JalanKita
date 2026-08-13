@@ -67,7 +67,13 @@ struct ReviewFindingsView: View {
     @State private var boxActive = true
     @State private var selectedFindingID: String?
     @State private var showingImporter = false
+    @State private var showingVideoImporter = false
     @State private var importError: String?
+
+    /// Seconds between sampled frames. 3 s by default: at ~2,7 s of CPU per frame
+    /// it keeps a clip's analysis to roughly its own duration, where 1 s makes it
+    /// three times longer than the footage.
+    @State private var videoIntervalSeconds: Double = 3.0
 
     private var currentFrame: ReviewFrame? { model.reviewFrame }
 
@@ -108,7 +114,7 @@ struct ReviewFindingsView: View {
                     resetSelection()
                 }
                 .disabled(model.reviewQueuePosition == nil
-                          || model.reviewQueuePosition == model.reviewQueue.count)
+                          || model.reviewQueuePosition == model.visibleReviewQueue.count)
             }
 
             // Stage 1: run the detector live on a new photo, as opposed to
@@ -118,18 +124,43 @@ struct ReviewFindingsView: View {
                 if model.isAnalyzingRoadDamage {
                     // A disabled button was the whole feedback story before, which
                     // for a CPU inference run reads as "this control is broken".
+                    // A clip takes minutes, so it gets a frame counter rather than
+                    // an indeterminate spinner — otherwise a working run and a
+                    // wedged one look identical for ten minutes.
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.small)
-                        Text("Menganalisis…").foregroundStyle(.secondary)
+                        Text(model.roadDamageVideoProgress ?? "Menganalisis…")
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
                     }
                 } else {
-                    Button {
-                        showingImporter = true
+                    Menu {
+                        Button {
+                            showingImporter = true
+                        } label: {
+                            Label("Unggah foto…", systemImage: "photo.badge.plus")
+                        }
+                        Button {
+                            showingVideoImporter = true
+                        } label: {
+                            Label("Unggah video…", systemImage: "video.badge.plus")
+                        }
+                        Divider()
+                        // The interval is the speed dial, so it is set where the
+                        // clip is chosen rather than buried in a settings screen.
+                        // ⚠️ ~2,7 s of CPU per frame: 1 s sampling on a 4,5-minute
+                        // clip is ~10 minutes of work, 3 s is ~3,5.
+                        Picker("Ambil frame tiap", selection: $videoIntervalSeconds) {
+                            Text("1 detik").tag(1.0)
+                            Text("3 detik").tag(3.0)
+                            Text("5 detik").tag(5.0)
+                            Text("10 detik").tag(10.0)
+                        }
                     } label: {
-                        Label("Unggah foto…", systemImage: "photo.badge.plus")
+                        Label("Unggah…", systemImage: "square.and.arrow.up")
                     }
                     .labelStyle(.titleAndIcon)
-                    .help("Jalankan detektor pada foto baru dan tambahkan ke antrean")
+                    .help("Jalankan detektor pada foto atau video baru")
                 }
             }
         }
@@ -144,6 +175,9 @@ struct ReviewFindingsView: View {
         }
         .fileImporter(isPresented: $showingImporter, allowedContentTypes: [.image]) { result in
             handleImport(result)
+        }
+        .fileImporter(isPresented: $showingVideoImporter, allowedContentTypes: [.movie]) { result in
+            handleVideoImport(result)
         }
         // Two alerts, two different failures: this one is "we could not even read
         // the file you picked", which never reaches the worker at all.
@@ -164,6 +198,22 @@ struct ReviewFindingsView: View {
         .onAppear {
             if model.reviewQueue.isEmpty { model.loadRoadDamageQueue() }
             if selectedFindingID == nil { resetSelection() }
+        }
+    }
+
+    /// Same staging dance as the photo path — the security scope `.fileImporter`
+    /// grants belongs to this process, not to the Python child that reads the clip.
+    private func handleVideoImport(_ result: Result<URL, Error>) {
+        switch result {
+        case .success(let url):
+            do {
+                model.uploadRoadDamageVideo(url: try Self.stageForWorker(url),
+                                            intervalSec: videoIntervalSeconds)
+            } catch {
+                importError = error.localizedDescription
+            }
+        case .failure(let error):
+            importError = error.localizedDescription
         }
     }
 
@@ -205,11 +255,13 @@ struct ReviewFindingsView: View {
 
     /// "12 dari 236", or "0 dari 0" when there is nothing queued. Both numbers are
     /// derived from the queue itself — the previous version hardcoded 12 and 41.
+    /// Counts the VISIBLE queue, so the denominator agrees with what the filmstrip
+    /// below is actually showing.
     private var subtitle: String {
         guard let position = model.reviewQueuePosition, let currentFrame else {
             return "0 dari 0 · antrean kosong"
         }
-        return "\(currentFrame.sourceClip) · \(position) dari \(model.reviewQueue.count)"
+        return "\(currentFrame.sourceClip) · \(position) dari \(model.visibleReviewQueue.count)"
     }
 
     @ViewBuilder
@@ -221,7 +273,7 @@ struct ReviewFindingsView: View {
             // it down toward a stated minimum reproduced the identical
             // corrupted-header rendering, just on this inner list instead
             // of the window's main one.
-            ReviewFilterSidebar()
+            ReviewFilterSidebar(model: model)
                 .frame(width: 240)
                 .layoutPriority(1)
 
@@ -238,9 +290,9 @@ struct ReviewFindingsView: View {
             ReviewFindingsPanel(
                 frame: frame,
                 selectedFindingID: $selectedFindingID,
-                reviewedIDs: Binding(
-                    get: { model.reviewedFindingIDs },
-                    set: { model.reviewedFindingIDs = $0 }
+                decisions: Binding(
+                    get: { model.findingDecisions },
+                    set: { model.findingDecisions = $0 }
                 ),
                 onDecision: advanceToNextUnreviewed
             )
@@ -248,14 +300,20 @@ struct ReviewFindingsView: View {
         }
     }
 
-    /// Reached in two very different situations, so the copy has to distinguish
-    /// them: the dataset is missing (a setup problem, with the reason in the log),
-    /// or it loaded and genuinely contains nothing to review.
+    /// Reached in several very different situations, so the copy has to
+    /// distinguish them: the dataset is missing (a setup problem, with the reason
+    /// in the log), it loaded and genuinely contains nothing to review, or — since
+    /// the status filter became real — it is full and the filter is hiding all of
+    /// it. That last one is the only recoverable case, and offering "Muat ulang
+    /// antrean" for it would reload a queue that was never the problem.
     private var emptyState: some View {
         ContentUnavailableView {
             Label("Tidak ada frame untuk ditinjau", systemImage: "photo.on.rectangle.angled")
         } description: {
-            if let reason = model.reviewLoadWarnings.first {
+            if filterIsHidingEverything {
+                Text("Tidak ada temuan berstatus “\(model.reviewStatusFilter.rawValue)”. "
+                     + "\(model.reviewQueue.count) frame lain tersembunyi oleh saringan.")
+            } else if let reason = model.reviewLoadWarnings.first {
                 Text(reason)
             } else if !model.reviewIncludesCleanFrames {
                 Text("Detektor tidak menemukan kerusakan pada frame mana pun. "
@@ -264,15 +322,25 @@ struct ReviewFindingsView: View {
                 Text("Antrean peninjauan kosong.")
             }
         } actions: {
-            // Upload first, and prominent. "Muat ulang antrean" was the only
-            // action here, which is precisely backwards in the case that matters:
-            // when the Stage 0 dataset is absent, reloading just fails again,
-            // while analysing your own photo is the one thing that does work.
-            Button("Unggah foto…") { showingImporter = true }
-                .buttonStyle(.borderedProminent)
-                .disabled(model.isAnalyzingRoadDamage)
-            Button("Muat ulang antrean") { model.loadRoadDamageQueue() }
+            if filterIsHidingEverything {
+                Button("Tampilkan semua") { model.reviewStatusFilter = .all }
+                    .buttonStyle(.borderedProminent)
+            } else {
+                // Upload first, and prominent. "Muat ulang antrean" was the only
+                // action here, which is precisely backwards in the case that
+                // matters: when the Stage 0 dataset is absent, reloading just
+                // fails again, while analysing your own photo is the one thing
+                // that does work.
+                Button("Unggah foto…") { showingImporter = true }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.isAnalyzingRoadDamage)
+                Button("Muat ulang antrean") { model.loadRoadDamageQueue() }
+            }
         }
+    }
+
+    private var filterIsHidingEverything: Bool {
+        !model.reviewQueue.isEmpty && model.visibleReviewQueue.isEmpty
     }
 
     private func resetSelection() {
@@ -284,8 +352,8 @@ struct ReviewFindingsView: View {
               let currentID = selectedFindingID,
               let currentIndex = currentFrame.findings.firstIndex(where: { $0.id == currentID }) else { return }
         let remaining = currentFrame.findings[(currentIndex + 1)...]
-        selectedFindingID = remaining.first { !model.reviewedFindingIDs.contains($0.id) }?.id
-            ?? currentFrame.findings.first { !model.reviewedFindingIDs.contains($0.id) }?.id
+        selectedFindingID = remaining.first { model.findingDecisions[$0.id] == nil }?.id
+            ?? currentFrame.findings.first { model.findingDecisions[$0.id] == nil }?.id
     }
 }
 

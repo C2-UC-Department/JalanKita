@@ -45,6 +45,17 @@ final class AppModel {
     /// frames. Position in this array IS the queue counter; nothing stores one.
     var reviewQueue: [ReviewFrame] = []
 
+    /// Frames produced by a live Stage 1 run — an uploaded photo, or every frame of
+    /// an uploaded clip — held separately from the Stage 0 dataset.
+    ///
+    /// 🔥 This exists because of a real bug, not for tidiness. `loadRoadDamageQueue`
+    /// assigns `reviewQueue` wholesale, and `setReviewIncludesCleanFrames` calls it.
+    /// So toggling "Termasuk frame bersih" used to **delete every live result** —
+    /// survivable when that was one photo you could re-run in two seconds, ruinous
+    /// once it is a clip that took ten minutes. Live frames are re-merged on every
+    /// dataset load instead.
+    private(set) var liveReviewFrames: [ReviewFrame] = []
+
     /// Which frame the reviewer is on. Held as an id rather than an index so a
     /// reload that changes the queue's length can't silently point at a
     /// different frame than the one that was on screen.
@@ -60,17 +71,83 @@ final class AppModel {
     /// than thrown away, per the app's "degrade, don't die" rule.
     var reviewLoadWarnings: [String] = []
 
+    /// `reviewQueue` narrowed by `reviewStatusFilter` — the ONE place the filter is
+    /// applied, and what every consumer must read.
+    ///
+    /// Singular on purpose. Four separate things page through this queue
+    /// (`reviewFrame`, `reviewQueuePosition`, `stepReviewFrame`, plus the filmstrip
+    /// and the view's own subtitle), and filtering at each call site would let one
+    /// of them drift — the visible symptom being "3 dari 12" printed over a
+    /// five-chip filmstrip.
+    ///
+    /// Frame-level semantics, which are not self-evident from the finding-level
+    /// filter: a frame survives when at least ONE of its findings matches. A clean
+    /// frame has no findings to match, so it appears under `.all` and `.unseen`
+    /// (nothing about it has been reviewed) and is hidden under the two decided
+    /// filters, where it would be a row with nothing in it.
+    /// Also narrowed by `reviewClipFilter` when one is set — see that property for
+    /// why a queue with a video in it needs one.
+    var visibleReviewQueue: [ReviewFrame] {
+        var queue = reviewQueue
+        if let clip = reviewClipFilter {
+            queue = queue.filter { $0.sourceClip == clip }
+        }
+        guard reviewStatusFilter != .all else { return queue }
+        return queue.filter { frame in
+            if frame.findings.isEmpty { return reviewStatusFilter == .unseen }
+            return frame.findings.contains { reviewStatusFilter.matches(findingDecisions[$0.id]) }
+        }
+    }
+
+    /// Show only frames from one clip, or all clips when nil.
+    ///
+    /// Needed the moment a video can be analysed. Stage 0 alone is 236 frames from
+    /// 29 clips and `sourceClip` was display-only; drop 60 freshly-analysed frames
+    /// into that and the reviewer has no way to look at just the clip they uploaded.
+    var reviewClipFilter: String?
+
+    /// Distinct clips present in the queue, in first-appearance order.
+    var reviewClipsPresent: [String] {
+        var seen = Set<String>()
+        return reviewQueue.compactMap { seen.insert($0.sourceClip).inserted ? $0.sourceClip : nil }
+    }
+
     var reviewFrame: ReviewFrame? {
-        guard let reviewSelectionID else { return reviewQueue.first }
-        return reviewQueue.first { $0.id == reviewSelectionID } ?? reviewQueue.first
+        let queue = visibleReviewQueue
+        guard let reviewSelectionID else { return queue.first }
+        return queue.first { $0.id == reviewSelectionID } ?? queue.first
     }
 
     /// 1-based position of the current frame, or nil when the queue is empty.
     /// Derived on every read — this is what replaced the hardcoded "12 dari 41".
     var reviewQueuePosition: Int? {
         guard let frame = reviewFrame,
-              let index = reviewQueue.firstIndex(where: { $0.id == frame.id }) else { return nil }
+              let index = visibleReviewQueue.firstIndex(where: { $0.id == frame.id }) else { return nil }
         return index + 1
+    }
+
+    /// How many findings across the whole queue carry this status — the sidebar's
+    /// counts. Over `reviewQueue`, never `visibleReviewQueue`: a filter that
+    /// rewrote its own row counts as you selected it would be unreadable.
+    func reviewFindingCount(_ filter: ReviewStatusFilter) -> Int {
+        reviewQueue.reduce(0) { total, frame in
+            total + frame.findings.filter { filter.matches(findingDecisions[$0.id]) }.count
+        }
+    }
+
+    func reviewFindingCount(ofType type: DefectType) -> Int {
+        reviewQueue.reduce(0) { $0 + $1.findings.filter { $0.defectType == type }.count }
+    }
+
+    /// Classes the loaded queue actually contains, in `DefectType`'s own order.
+    ///
+    /// This is what keeps `blockedPark` off the road-damage sidebar without
+    /// touching the enum, which the parking vertical and the map still use: the
+    /// road-damage detector emits the merged 3-class taxonomy and cannot produce
+    /// it, so it never appears here — and a hardcoded list would go stale instead.
+    var reviewDefectTypesPresent: [DefectType] {
+        let present = Set(reviewQueue.flatMap { $0.findings.map(\.defectType) })
+        return DefectType.allCases.filter { present.contains($0) }
     }
 
     /// Real parking-disturbance results, keyed by session id — "Tinjauan
@@ -87,9 +164,22 @@ final class AppModel {
     var pipelineSteps: [PipelineStep] = SampleData.pipelineSteps
     var logLines: [LogLine] = SampleData.logLines
 
-    /// Findings the reviewer has already accepted/rejected this session,
-    /// keyed by Finding.id — drives the review workflow's progress badge.
-    var reviewedFindingIDs: Set<String> = []
+    /// The reviewer's verdicts this session, keyed by `Finding.id`.
+    ///
+    /// A dictionary rather than the `Set<String>` it replaced, because Terima and
+    /// Tolak are opposite answers and a set could only record "was asked". Both
+    /// buttons wrote to that set, so a rejection was indistinguishable from an
+    /// acceptance everywhere downstream — including in a footer that claimed
+    /// rejections were being collected for threshold calibration.
+    ///
+    /// In-memory, and it evaporates on quit: this app persists nothing at all
+    /// (CLAUDE.md fact 7). That is a real limit, not an oversight, and the panel's
+    /// footer now says so instead of implying an export exists.
+    var findingDecisions: [Finding.ID: ReviewDecision] = [:]
+
+    /// Which findings Peninjauan is currently showing. Drives `visibleReviewQueue`.
+    /// Defaults to `.all` — see `ReviewStatusFilter` for why that case exists.
+    var reviewStatusFilter: ReviewStatusFilter = .all
 
     private let inferenceService = InferenceService.shared
     private let carDetectionService = CarDetectionService.shared
@@ -99,6 +189,14 @@ final class AppModel {
     /// disable its upload action instead of queueing a second request behind the
     /// first (the worker handles one at a time).
     var isAnalyzingRoadDamage: Bool = false
+
+    /// Human-readable position in a running video analysis, or nil when idle.
+    ///
+    /// A clip takes minutes, so "sedang memproses" alone is not enough — a reviewer
+    /// cannot tell a working run from a wedged one. Deliberately one string rather
+    /// than the `PipelineStep` list the parking video path uses: this pipeline has
+    /// two phases, not a named sequence, and a two-item tracker would be chrome.
+    var roadDamageVideoProgress: String?
 
     /// The reason the last live road-damage analysis failed, or nil.
     ///
@@ -154,9 +252,7 @@ final class AppModel {
     /// Counted from the queue's actual contents — it used to be `41 - reviewed`,
     /// with 41 being a number no data ever produced.
     var unreviewedFindingsCount: Int {
-        reviewQueue.reduce(0) { total, frame in
-            total + frame.findings.filter { !reviewedFindingIDs.contains($0.id) }.count
-        }
+        reviewFindingCount(.unseen)
     }
 
     var surveyorCount: Int {
@@ -193,7 +289,12 @@ final class AppModel {
     func loadRoadDamageQueue() {
         do {
             let result = try RoadDamageDataset.load(includeClean: reviewIncludesCleanFrames)
-            reviewQueue = result.frames
+            // Live results first, then the dataset. Re-merged rather than preserved
+            // in place because this method is the only writer of `reviewQueue` and a
+            // reload must not be able to discard work that cost minutes to produce.
+            reviewQueue = liveReviewFrames + result.frames.filter { frame in
+                !liveReviewFrames.contains { $0.id == frame.id }
+            }
             reviewLoadWarnings = result.warnings
 
             // Keep the reviewer where they were if that frame survived the reload
@@ -225,17 +326,19 @@ final class AppModel {
     }
 
     func selectReviewFrame(id: ReviewFrame.ID) {
-        guard reviewQueue.contains(where: { $0.id == id }) else { return }
+        guard visibleReviewQueue.contains(where: { $0.id == id }) else { return }
         reviewSelectionID = id
     }
 
     /// Steps the queue by `offset`, clamped at both ends — no wraparound, so the
-    /// reviewer can tell when they've reached the end of the work.
+    /// reviewer can tell when they've reached the end of the work. Steps through
+    /// what is on screen, not what is loaded: with a filter applied, "berikutnya"
+    /// meaning "the next frame you cannot see" would be worse than useless.
     func stepReviewFrame(by offset: Int) {
-        guard !reviewQueue.isEmpty,
-              let current = reviewQueuePosition else { return }
-        let target = min(max(current - 1 + offset, 0), reviewQueue.count - 1)
-        reviewSelectionID = reviewQueue[target].id
+        let queue = visibleReviewQueue
+        guard !queue.isEmpty, let current = reviewQueuePosition else { return }
+        let target = min(max(current - 1 + offset, 0), queue.count - 1)
+        reviewSelectionID = queue[target].id
     }
 
     /// Stage 1: run the detector live on a photo and put the result at the FRONT
@@ -263,18 +366,110 @@ final class AppModel {
             defer { isAnalyzingRoadDamage = false }
             do {
                 let frame = try await roadDamageService.analyze(imageURL: url)
-                reviewQueue.removeAll { $0.id == frame.id }
-                reviewQueue.insert(frame, at: 0)
+                addLiveFrames([frame])
+                // Clear the filter before selecting. A frame whose findings are all
+                // undecided is invisible under "Terverifikasi"/"Ditolak", so landing
+                // the reviewer on a photo they explicitly asked for would otherwise
+                // show them an empty screen and look like the analysis failed.
+                reviewStatusFilter = .all
                 reviewSelectionID = frame.id
                 selection = .review
                 appendLog("Selesai: \(frame.findings.count) temuan · skor \(frame.score) "
                           + "(\(frame.severity.label)) pada \(url.lastPathComponent).",
                           isWarning: false)
+                // The caveat belongs in the durable record too, not only on screen.
+                if let warnings = frame.warnings {
+                    appendLog(warnings, isWarning: true)
+                }
             } catch {
                 appendLog(error.localizedDescription, isWarning: true)
                 roadDamageError = error.localizedDescription
             }
         }
+    }
+
+    /// Puts live Stage 1 results at the FRONT of the queue, in one pass.
+    ///
+    /// Front, not back, because the reviewer just asked for these and expects to
+    /// land on them. One pass, not one insert per frame, for two reasons: sixty
+    /// `insert(at: 0)` calls are quadratic, and — worse — they arrive **reversed**,
+    /// so a clip would read back-to-front.
+    ///
+    /// Re-analysing the same file replaces its entry rather than duplicating it;
+    /// `ReviewFrame.id` is the filename stem for exactly that reason.
+    func addLiveFrames(_ frames: [ReviewFrame]) {
+        guard !frames.isEmpty else { return }
+        let ids = Set(frames.map(\.id))
+        liveReviewFrames.removeAll { ids.contains($0.id) }
+        liveReviewFrames = frames + liveReviewFrames
+        reviewQueue.removeAll { ids.contains($0.id) }
+        reviewQueue.insert(contentsOf: frames, at: 0)
+
+        // Clear filters before selecting. A frame whose findings are all undecided
+        // is invisible under "Terverifikasi"/"Ditolak", and a clip filter left over
+        // from a previous upload hides the new one — either way the reviewer would
+        // land on an empty screen and read it as a failed analysis.
+        reviewStatusFilter = .all
+        reviewClipFilter = nil
+        reviewSelectionID = frames.first?.id
+        selection = .review
+    }
+
+    /// Stage 1 over a whole clip: sample every `intervalSec` seconds, analyse each
+    /// frame, then add them all at once.
+    ///
+    /// ⚠️ Minutes, not seconds. The app forces CPU, so a frame costs ~2,7 s and a
+    /// 4,5-minute clip at a 3 s interval is roughly its own duration again. That is
+    /// why this one gets a real progress tracker while the photo path does not.
+    func uploadRoadDamageVideo(url: URL, intervalSec: Double = 3.0) {
+        guard !isAnalyzingRoadDamage else { return }
+        isAnalyzingRoadDamage = true
+        roadDamageError = nil
+        let sessionID = "peninjauan-\(UUID().uuidString.prefix(8))"
+        appendLog("Mengambil frame dari \(url.lastPathComponent) (tiap \(intervalSec.formatted()) detik)…",
+                  isWarning: false)
+
+        Task {
+            defer { isAnalyzingRoadDamage = false }
+            do {
+                let workDir = roadDamageVideoWorkDir(sessionID: sessionID)
+                let frames = try await roadDamageService.analyzeVideo(
+                    videoURL: url, sessionID: sessionID, intervalSec: intervalSec,
+                    workDir: workDir,
+                    onExtract: { [weak self] progress in
+                        self?.roadDamageVideoProgress =
+                            "Mengambil frame \(progress.framesDone)/\(progress.framesTotal)"
+                    },
+                    onFrame: { [weak self] done, total in
+                        self?.roadDamageVideoProgress = "Menganalisis frame \(done)/\(total)"
+                    })
+                roadDamageVideoProgress = nil
+
+                guard !frames.isEmpty else {
+                    appendLog("Tidak ada frame yang bisa diambil dari \(url.lastPathComponent).",
+                              isWarning: true)
+                    return
+                }
+                addLiveFrames(frames)
+                let withFindings = frames.filter { !$0.findings.isEmpty }.count
+                appendLog("Selesai: \(frames.count) frame dari \(url.lastPathComponent), "
+                          + "\(withFindings) berisi temuan.", isWarning: false)
+            } catch {
+                roadDamageVideoProgress = nil
+                appendLog(error.localizedDescription, isWarning: true)
+                roadDamageError = error.localizedDescription
+            }
+        }
+    }
+
+    /// Extracted frames live beside the other durable pipeline output. ⚠️ Nothing
+    /// cleans this up, exactly like `car-detection/` — a known, recorded cost.
+    private func roadDamageVideoWorkDir(sessionID: String) -> URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory,
+                                            in: .userDomainMask)[0]
+        return base
+            .appendingPathComponent("JalanKita Mac/road-damage", isDirectory: true)
+            .appendingPathComponent(sessionID, isDirectory: true)
     }
 
     /// Worker stderr -> log. Progress events are folded into a single line per

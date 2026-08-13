@@ -13,9 +13,16 @@
 //  verified against IMG_0040_f000030_t0001000 — worker output and CSV row agree
 //  box for box, including `deduct_effective` and the resulting condition of 50.
 //
-//  Note what is NOT here: no mask payload, no polygon, no per-pixel anything.
-//  ADR-015 ships boxes; adding masks later is a deliberate schema widening and a
-//  separate decision, not something to sneak in as an optional field.
+//  Note what is still NOT here: no mask payload, no polygon, no per-pixel anything.
+//  `extentPct` is a single scalar per box — how much of that rectangle a U-Net
+//  calls damage — not a shape. Drawing a real mask would need geometry on the
+//  wire and a `FrameCanvasView` that is not built around a rect; that remains a
+//  separate, deliberate decision (ADR-021).
+//
+//  ⚠️ `extentPct` and `extentSource` are OPTIONAL, and both facts matter. They are
+//  absent from Stage 0's CSV rows, absent when a frame has no boxes, and absent
+//  when the worker could not trust the extent model for that image. Making either
+//  non-optional would break decoding of every Stage 0 row.
 //
 
 import Foundation
@@ -55,6 +62,21 @@ struct RoadDamageBox: Decodable {
     /// anything itself.
     let deductEffective: Double
 
+    /// How much of this box a U-Net actually calls damage, as a percentage of the
+    /// whole frame — the same unit as `areaPct`, so the two are directly comparable.
+    ///
+    /// `areaPct` is the box's own footprint and over-states a thin diagonal crack by
+    /// construction; boxes drawn around hand-brushed ground truth reach only 24,48 %
+    /// pixel precision, which caps what `areaPct` can ever mean. This is the honest
+    /// figure. 🚫 It does **not** feed severity — `condition` and `deductEffective`
+    /// are still box-derived, because Stage 0 has no extent column and ADR-016
+    /// requires both paths to grade a frame identically. Displayed, never scored.
+    let extentPct: Double?
+
+    /// Provenance for `extentPct`, currently always `"unet"` when present. Carried
+    /// now so the later fallback policy is not another schema widening.
+    let extentSource: String?
+
     enum CodingKeys: String, CodingKey {
         case cls, cx, cy, w, h, conf
         case boxIndex = "box_index"
@@ -62,6 +84,8 @@ struct RoadDamageBox: Decodable {
         case inWheelpath = "in_wheelpath"
         case deductRaw = "deduct_raw"
         case deductEffective = "deduct_effective"
+        case extentPct = "extent_pct"
+        case extentSource = "extent_source"
     }
 }
 
@@ -80,6 +104,35 @@ struct RoadDamageResponse: Decodable {
     /// Human-readable provenance caveat shipped with every result, per this
     /// repo's wire convention — currently the un-measured Indonesian domain gap.
     let warnings: String?
+
+    /// The same sentence `worker_main.py:198-199` sends, for the path that never
+    /// talks to the worker.
+    ///
+    /// Stage 0 reads `outputs/quantify/per_frame.csv` and there is no warnings
+    /// column in it, but the caveat is a property of the DETECTOR, not of the
+    /// transport — the CSVs are that same model's output, just computed earlier.
+    /// Leaving Stage 0 uncaveated would have hidden it on 236 of ~237 queue
+    /// entries, i.e. everywhere except a photo the reviewer uploaded themselves,
+    /// which is not a caveat so much as an easter egg.
+    ///
+    /// Yes, this duplicates a Python string literal, and that is the deliberate
+    /// part: it lives HERE, immediately under the `warnings` field, because
+    /// CLAUDE.md's schema rule already names this file and `worker_main.py` as a
+    /// pair that changes together. Put it in `RoadDamageDataset` or a view and it
+    /// escapes the one rule that would catch the drift. Stage 1 still prefers the
+    /// live value (`response.warnings ?? domainGapCaveat`), so editing the Python
+    /// alone changes what the worker path renders immediately; the constant is the
+    /// floor, not the source of truth.
+    ///
+    /// Rejected: deriving Stage 0's text from `outputs/quantify/summary.json`'s
+    /// `note` field. It exists and says the right thing with real numbers attached,
+    /// but it is English (CLAUDE.md requires Bahasa Indonesia for user-facing
+    /// strings) and it is a DIFFERENT sentence — the two stages would then caveat
+    /// the same road with two different texts, which is the drift this was
+    /// supposed to avoid, relocated into prose.
+    static let domainGapCaveat =
+        "Model RDD2022 belum divalidasi pada data Indonesia — jumlah temuan "
+        + "adalah batas bawah, bukan kebenaran."
 
     enum CodingKeys: String, CodingKey {
         case id, ok, error, condition, grade, boxes, warnings

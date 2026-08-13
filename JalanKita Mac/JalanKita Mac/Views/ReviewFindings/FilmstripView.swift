@@ -27,7 +27,10 @@ struct FilmstripView: View {
     var model: AppModel
     let frame: ReviewFrame
 
-    private var queue: [ReviewFrame] { model.reviewQueue }
+    /// The FILTERED queue, matching the toolbar's "N dari M" and the prev/next
+    /// range. Reading `model.reviewQueue` here instead is how a strip ends up
+    /// showing five chips under a subtitle that says "3 dari 236".
+    private var queue: [ReviewFrame] { model.visibleReviewQueue }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
