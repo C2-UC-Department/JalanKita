@@ -32,11 +32,14 @@
 //  and doesn't go through whatever's failing there.
 //
 //  Since road damage became stage 3 of this pipeline, this screen shows BOTH
-//  verticals against one video. They share the player, the timeline axis and the
-//  playhead-proximity rule, and nothing else — separate selections, separate
-//  strips, separate right-hand panes, switched by `mode`. The alternative, one
-//  merged list, would have had to invent an ordering across two things measured at
-//  different frames for different reasons.
+//  verticals against one video, on one shared timeline (`ParkingTimelineView`
+//  draws both a vertical's ticks — magenta for parking, red for road damage —
+//  on the same line, positioned by the same `sessionRelativeSeconds` axis).
+//  They still keep separate selections (`selectedAnalysisID`/`selectedFrameID`),
+//  since the underlying results are two distinct lists measured at different
+//  frames for different reasons — but there's no manual tab anymore. Whichever
+//  marker was tapped most recently (`lastSelectionKind`) decides which strip,
+//  which on-video overlay, and which right-hand pane show.
 //
 
 import AppKit
@@ -48,21 +51,15 @@ struct ParkingVideoReviewView: View {
     let session: Session
     var model: AppModel
 
-    /// Which vertical the strip, the overlay and the right-hand pane are showing.
-    /// Both timelines stay visible in either mode — seeing that a damaged stretch
-    /// and a blocked stretch coincide is worth more than the vertical space.
-    private enum ReviewMode: String, CaseIterable, Identifiable {
-        case parkir, kerusakan
-        var id: String { rawValue }
-        var title: String {
-            switch self {
-            case .parkir: "Parkir"
-            case .kerusakan: "Kerusakan jalan"
-            }
-        }
+    /// Which vertical's marker was tapped most recently — decides which strip,
+    /// which on-video overlay, and which right-hand pane show. No manual toggle:
+    /// the timeline itself carries both verticals' ticks on one line, and tapping
+    /// either kind of tick is what switches this.
+    private enum SelectionKind: Equatable {
+        case vehicle, damage
     }
 
-    @State private var mode: ReviewMode = .parkir
+    @State private var lastSelectionKind: SelectionKind = .vehicle
     @State private var player: AVPlayer?
     @State private var isLoadingVideo = true
     @State private var selectedAnalysisID: ParkingAnalysis.ID?
@@ -125,38 +122,25 @@ struct ParkingVideoReviewView: View {
         HStack(spacing: 0) {
             VStack(spacing: 0) {
                 videoArea
-                if !damageFrames.isEmpty {
-                    Picker("", selection: $mode) {
-                        ForEach(ReviewMode.allCases) { Text($0.title).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .padding(.horizontal, 16)
-                    .padding(.top, 10)
-                }
-                if showsTimeline {
-                    ParkingTimelineView(analyses: analyses, totalSeconds: totalSeconds,
-                                        selectedAnalysisID: $selectedAnalysisID)
+                if showsTimeline || showsDamageTimeline {
+                    ParkingTimelineView(analyses: analyses, damageFrames: damageFrames, totalSeconds: totalSeconds,
+                                        selectedAnalysisID: $selectedAnalysisID, selectedFrameID: $selectedFrameID,
+                                        onSelectAnalysis: { selectAnalysis($0) },
+                                        onSelectFrame: { selectFrame($0) })
                         .padding(.horizontal, 16)
                         .padding(.vertical, 10)
                 }
-                if showsDamageTimeline {
-                    RoadDamageTimelineView(frames: damageFrames, totalSeconds: totalSeconds,
-                                           selectedFrameID: $selectedFrameID)
-                        .padding(.horizontal, 16)
-                        .padding(.bottom, 10)
-                }
-                switch mode {
-                case .parkir:
+                switch lastSelectionKind {
+                case .vehicle:
                     ParkingCandidateStripView(analyses: analyses, selectedAnalysisID: $selectedAnalysisID)
-                case .kerusakan:
+                case .damage:
                     RoadDamageFrameStripView(frames: damageFrames, selectedFrameID: $selectedFrameID)
                 }
             }
             .frame(minWidth: 480, maxWidth: .infinity)
 
-            switch mode {
-            case .parkir:
+            switch lastSelectionKind {
+            case .vehicle:
                 if let analysis {
                     // The detected-vehicle frame used to have its own pane here
                     // — it now lives at the top of ParkingMetricsPanel's BEV
@@ -164,7 +148,7 @@ struct ParkingVideoReviewView: View {
                     // use the space this pane used to take.
                     ParkingMetricsPanel(analysis: analysis, selectedVehicleID: selectedVehicleID)
                 }
-            case .kerusakan:
+            case .damage:
                 if let damageFrame {
                     RoadDamagePanel(frame: damageFrame)
                 }
@@ -181,6 +165,7 @@ struct ParkingVideoReviewView: View {
             // Same "pipeline already knows which vehicle" default as the
             // previous pass — no manual tap needed to pick a vehicle.
             selectedVehicleID = analysis?.bestMatchVehicleID
+            lastSelectionKind = .vehicle
             seekToSelectedAnalysis()
         }
         .onChange(of: selectedVehicleID) { _, newValue in
@@ -190,7 +175,7 @@ struct ParkingVideoReviewView: View {
         .onChange(of: selectedFrameID) { _, _ in
             // Picking a damage tick switches the pane to it — otherwise the click
             // would seek the video while the right-hand side still described a car.
-            mode = .kerusakan
+            lastSelectionKind = .damage
             seekToSelectedFrame()
         }
         .onDisappear {
@@ -222,7 +207,7 @@ struct ParkingVideoReviewView: View {
                         .frame(width: geo.size.width, height: geo.size.height)
                 }
 
-                if mode == .parkir, isNearSelectedTimestamp, let analysis, let selectedVehicle {
+                if lastSelectionKind == .vehicle, isNearSelectedTimestamp, let analysis, let selectedVehicle {
                     let rect = ParkingMetrics.normalizedRect(for: selectedVehicle, imageWidth: analysis.imageWidth,
                                                              imageHeight: analysis.imageHeight)
                     if rect.width > 0, rect.height > 0 {
@@ -238,7 +223,7 @@ struct ParkingVideoReviewView: View {
                 // 5 s default the playhead is off that frame far more often than
                 // on it, so drawing them continuously would put a pothole outline
                 // over whatever happens to be on screen.
-                if mode == .kerusakan, isNearSelectedFrame, let damageFrame {
+                if lastSelectionKind == .damage, isNearSelectedFrame, let damageFrame {
                     ForEach(damageFrame.findings) { finding in
                         let rect = finding.frameRect
                         if rect.width > 0, rect.height > 0 {
@@ -279,13 +264,30 @@ struct ParkingVideoReviewView: View {
         }
     }
 
+    /// Fired directly by a timeline tap (see `ParkingTimelineView.onSelectAnalysis`)
+    /// so re-tapping the already-selected marker still switches the pane/strip and
+    /// re-seeks — `.onChange(of: selectedAnalysisID)` below only fires on an actual
+    /// value change, which a re-tap of the current selection isn't.
+    private func selectAnalysis(_ analysis: ParkingAnalysis) {
+        lastSelectionKind = .vehicle
+        seekToSeconds(analysis.sessionRelativeSeconds)
+    }
+
+    private func selectFrame(_ frame: ReviewFrame) {
+        lastSelectionKind = .damage
+        seekToSeconds(frame.sessionRelativeSeconds)
+    }
+
     private func seekToSelectedAnalysis() {
-        guard let player, let seconds = analysis?.sessionRelativeSeconds else { return }
-        player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        seekToSeconds(analysis?.sessionRelativeSeconds)
     }
 
     private func seekToSelectedFrame() {
-        guard let player, let seconds = damageFrame?.sessionRelativeSeconds else { return }
+        seekToSeconds(damageFrame?.sessionRelativeSeconds)
+    }
+
+    private func seekToSeconds(_ seconds: Double?) {
+        guard let player, let seconds else { return }
         player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
     }
 }
@@ -311,12 +313,13 @@ private struct RoadDamageFindingOverlay: View {
 /// The flagged vehicle's box, drawn directly on the video instead of a
 /// separate still-frame canvas (the old `VehicleCandidatesCanvasView`,
 /// removed once nothing referenced it anymore) — view-only (no tap/
-/// selection, no number tag), magenta for "this is the current selection,"
-/// the same color language that view used for the same concept.
+/// selection, no number tag), `Color.parkingMarker` (magenta) for "this is
+/// the current selection," the same hue the shared timeline uses for every
+/// parking-disturbance tick.
 private struct DetectedVehicleOverlay: View {
     let vehicle: VehicleSummary
 
-    private var color: Color { Color(red: 1.0, green: 0, blue: 0.78) }
+    private var color: Color { .parkingMarker }
 
     var body: some View {
         ZStack {

@@ -26,13 +26,11 @@ struct SessionInboxView: View {
     @State private var importError: String?
     @State private var pendingDeletionID: Session.ID?
 
-    /// Sourced from `model.inboxSessions`, not `model.sessions` — a finished
-    /// session belongs to Laporan and must not also appear here, or the two
-    /// screens disagree about where a session lives.
     private var filteredSessions: [Session] {
+        let visible = model.sessions.filter { $0.status != .done }
         let base = searchText.isEmpty
-            ? model.inboxSessions
-            : model.inboxSessions.filter {
+            ? visible
+            : visible.filter {
                 $0.roadName.localizedCaseInsensitiveContains(searchText) ||
                 $0.surveyor.name.localizedCaseInsensitiveContains(searchText)
             }
@@ -40,34 +38,22 @@ struct SessionInboxView: View {
     }
 
     private var selectedSession: Session? {
-        model.inboxSessions.first { $0.id == selection }
+        model.sessions.first { $0.id == selection }
     }
 
     var body: some View {
-        Group {
-            if model.inboxSessions.isEmpty {
-                ContentUnavailableView(
-                    model.reportSessions.isEmpty ? "Belum ada sesi" : "Semua sesi sudah diproses",
-                    systemImage: model.reportSessions.isEmpty ? "tray" : "checkmark.circle",
-                    description: Text(model.reportSessions.isEmpty
-                        ? "Sesi akan muncul di sini setelah surveyor menyinkronkan rekaman dari iPhone, atau unggah foto/video secara manual lewat menu \"Unggah…\" di atas."
-                        : "Tidak ada yang menunggu diproses. \(model.reportSessions.count) sesi yang sudah selesai ada di Laporan.")
-                )
-            } else {
-                HSplitView {
-                    table
-                        .frame(minWidth: 560)
+        HSplitView {
+            table
+                .frame(minWidth: 560)
 
-                    if let selectedSession {
-                        SessionDetailPanel(session: selectedSession, model: model)
-                            .frame(minWidth: 380, idealWidth: 420, maxWidth: 480)
-                    }
-                }
+            if let selectedSession {
+                SessionDetailPanel(session: selectedSession, model: model)
+                    .frame(minWidth: 380, idealWidth: 420, maxWidth: 480)
             }
         }
         .searchable(text: $searchText, placement: .toolbar, prompt: "Cari jalan atau surveyor")
         .navigationTitle("Sesi masuk")
-        .navigationSubtitle("\(model.inboxSessions.count) belum diproses · \(model.newSessionsCount) siap · \(formattedGB(model.totalSizeGB)) GB total")
+        .navigationSubtitle("\(model.newSessionsCount) baru · \(formattedGB(model.totalSizeGB)) GB total")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
@@ -84,25 +70,6 @@ struct SessionInboxView: View {
                 } label: {
                     Label("Unggah…", systemImage: "square.and.arrow.up")
                 }
-            }
-            // Stage 3's cost controls, here rather than on the review screen
-            // because they have to be set BEFORE a run starts — both video entry
-            // points (Unggah Video and Proses) are on this screen.
-            ToolbarItem(placement: .automatic) {
-                Menu {
-                    Picker("Interval frame", selection: $model.roadDamageIntervalSeconds) {
-                        Text("1 detik — paling rapat, ~2,7× durasi klip").tag(1.0)
-                        Text("3 detik — ~0,9× durasi klip").tag(3.0)
-                        Text("5 detik — ~0,54× durasi klip").tag(5.0)
-                        Text("10 detik — paling cepat").tag(10.0)
-                    }
-                    Divider()
-                    Toggle("Lewati frame nyaris identik", isOn: $model.roadDamageSkipDuplicates)
-                } label: {
-                    Label("Kerusakan jalan", systemImage: "road.lanes")
-                }
-                .help("Interval sampling frame untuk deteksi kerusakan jalan. "
-                      + "Setiap frame memakan ~2,7 detik CPU.")
             }
         }
         .fileImporter(isPresented: $showingPhotoImporter, allowedContentTypes: [.image]) { result in
@@ -237,19 +204,18 @@ struct SessionInboxView: View {
     /// full control of the pane, the inset content is measured at its own
     /// natural size and pinned above it.
     private var statRow: some View {
-        VStack(spacing: 0) {
+        let pendingSize = formattedSize(gb: model.pendingSizeGB)
+        return VStack(spacing: 0) {
             HStack(spacing: 0) {
                 StatTile(title: "MENUNGGU DIPROSES", value: "\(model.newSessionsCount)", unit: "sesi")
                 Divider()
-                StatTile(title: "TOTAL SESI", value: "\(model.sessions.count)", unit: nil,
+                StatTile(title: "TOTAL SESI", value: "\(model.pendingSessionsCount)", unit: nil,
                          detail: "\(model.surveyorCount) surveyor")
                 Divider()
-                StatTile(title: "JARAK TERSURVEI", value: formattedDistance(km: model.totalDistanceKm).value,
-                         unit: formattedDistance(km: model.totalDistanceKm).unit,
-                         detail: "\(model.doneSessionsCount) sesi selesai")
+                StatTile(title: "PERLU PERHATIAN", value: "\(model.attentionNeededCount)", unit: nil,
+                         detail: "terdegradasi/gagal", accent: Severity.urgent.literalColor)
                 Divider()
-                StatTile(title: "PARKIR MENGGANGGU", value: "\(model.disturbanceCount)", unit: nil,
-                         detail: "kendaraan terdeteksi", accent: Severity.urgent.literalColor)
+                StatTile(title: "UKURAN DATA", value: pendingSize.value, unit: pendingSize.unit)
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 14)

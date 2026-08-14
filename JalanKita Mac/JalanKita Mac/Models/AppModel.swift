@@ -271,24 +271,6 @@ final class AppModel {
         sessions.filter(\.status.isQueued)
     }
 
-    /// What Sesi masuk shows: everything that still needs the operator, which is
-    /// every session that isn't `.done`.
-    ///
-    /// `.failed` and `.degraded` deliberately stay here rather than moving to
-    /// Laporan with the finished work. They have been through the pipeline, but
-    /// the thing the operator has to do next — start them again — only exists on
-    /// this screen, so filing them under "finished" would leave a session with a
-    /// pending action in a screen that has no way to act on it.
-    var inboxSessions: [Session] {
-        sessions.filter { $0.status != .done }
-    }
-
-    /// What Laporan shows: finished work only. Ordering is the view's business
-    /// (ReportsView sorts by its own `sortOrder`), not fixed here.
-    var reportSessions: [Session] {
-        sessions.filter { $0.status == .done }
-    }
-
     var batchSelectedCount: Int {
         sessions.filter(\.selectedForBatch).count
     }
@@ -317,17 +299,30 @@ final class AppModel {
         sessions.filter { $0.status == .done }.count
     }
 
-    var totalVehiclesAnalyzed: Int {
-        parkingAnalyses.values.reduce(0) { $0 + $1.count }
+    /// Finished sessions — the population `ReportsView` ("Laporan") lists.
+    var doneSessions: [Session] {
+        sessions.filter { $0.status == .done }
     }
 
-    /// Real parking-violation count across every session's results — the
-    /// pipeline that actually works today, replacing the old fake
-    /// "segments ready to report" tile (segments have no real producer yet).
-    var disturbanceCount: Int {
-        parkingAnalyses.values.reduce(0) { count, analyses in
-            count + analyses.filter { $0.carCandidate?.disturbance == true }.count
-        }
+    var pendingSessionsCount: Int {
+        sessions.count - doneSessionsCount
+    }
+
+    var attentionNeededCount: Int {
+        sessions.filter {
+            switch $0.status {
+            case .degraded, .failed: return true
+            default: return false
+            }
+        }.count
+    }
+
+    var pendingSizeGB: Double {
+        sessions.filter { $0.status != .done }.reduce(0) { $0 + $1.sizeGB }
+    }
+
+    var totalVehiclesAnalyzed: Int {
+        parkingAnalyses.values.reduce(0) { $0 + $1.count }
     }
 
     func toggleBatchSelection(for sessionID: Session.ID) {

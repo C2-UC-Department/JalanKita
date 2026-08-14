@@ -2,22 +2,11 @@
 //  ReportsView.swift
 //  JalanKita Mac
 //
-//  Where a session goes once it is finished. Sesi masuk holds everything that
-//  still needs the operator, Antrean holds what is actively running, and this
-//  screen holds `.done` — see `AppModel.inboxSessions` / `reportSessions` for
-//  the single status-based rule all three share.
-//
-//  Deliberately built on the same `Table` + `.safeAreaInset(edge: .top)`
-//  arrangement as SessionInboxView rather than a fresh layout: that file's own
-//  comments document why a stat header must be an inset rather than a VStack
-//  sibling (a fixed-height header stacked in front of a Table gets handed the
-//  pane's full height and its Dividers stretch down the screen). Same container
-//  shape, same fix.
-//
-//  Row navigation reuses the `.navigationDestination(for: Session.self)` that
-//  ContentView already registers at the top of the NavigationStack, so opening
-//  a report lands on the same ParkingVideoReviewView the inbox's detail panel
-//  opens. No second navigation mechanism.
+//  "Laporan" — the history of sessions that have finished processing.
+//  Mirrors SessionInboxView's Table + SessionDetailPanel layout (same
+//  reasons: sortable/resizable columns, native selection, keyboard nav),
+//  minus everything only relevant to sessions still awaiting work — no
+//  batch-select column, no "Proses"/"Unggah…" toolbar.
 //
 
 import SwiftUI
@@ -33,29 +22,31 @@ struct ReportsView: View {
 
     private var filteredSessions: [Session] {
         let base = searchText.isEmpty
-            ? model.reportSessions
-            : model.reportSessions.filter {
+            ? model.doneSessions
+            : model.doneSessions.filter {
                 $0.roadName.localizedCaseInsensitiveContains(searchText) ||
                 $0.surveyor.name.localizedCaseInsensitiveContains(searchText)
             }
         return base.sorted(using: sortOrder)
     }
 
+    private var selectedSession: Session? {
+        model.sessions.first { $0.id == selection }
+    }
+
     var body: some View {
-        Group {
-            if model.reportSessions.isEmpty {
-                ContentUnavailableView(
-                    "Belum ada laporan", systemImage: "doc.text",
-                    description: Text("Sesi pindah ke sini otomatis setelah selesai diproses. "
-                                      + "Yang masih menunggu ada di Sesi masuk, yang sedang berjalan ada di Antrean.")
-                )
-            } else {
-                table
+        HSplitView {
+            table
+                .frame(minWidth: 560)
+
+            if let selectedSession {
+                SessionDetailPanel(session: selectedSession, model: model)
+                    .frame(minWidth: 380, idealWidth: 420, maxWidth: 480)
             }
         }
         .searchable(text: $searchText, placement: .toolbar, prompt: "Cari jalan atau surveyor")
         .navigationTitle("Laporan")
-        .navigationSubtitle("\(model.reportSessions.count) sesi selesai · \(model.disturbanceCount) pelanggaran")
+        .navigationSubtitle("\(model.doneSessionsCount) sesi selesai")
         .alert("Hapus sesi ini?", isPresented: .constant(pendingDeletionID != nil), presenting: pendingDeletionID) { id in
             Button("Hapus", role: .destructive) {
                 model.deleteSession(id)
@@ -65,6 +56,64 @@ struct ReportsView: View {
         } message: { _ in
             Text("Video dan hasil analisis sesi ini akan dihapus permanen dari Mac ini.")
         }
+        .onAppear {
+            if selection == nil { selection = filteredSessions.first?.id }
+        }
+    }
+
+    private func formattedGB(_ value: Double) -> String {
+        value.formatted(.number.locale(Locale(identifier: "id_ID")).precision(.fractionLength(1)))
+    }
+
+    /// GB alone rounds any file under ~50 MB to a misleading "0,0" at the
+    /// stat tiles' one-decimal precision — a single manually-uploaded photo
+    /// or short video routinely falls in that range. Switching to MB below
+    /// 1 GB keeps small, real sizes visible instead of reading as zero/broken.
+    private func formattedSize(gb: Double) -> (value: String, unit: String) {
+        if gb < 1 {
+            let mb = gb * 1024
+            return (mb.formatted(.number.locale(Locale(identifier: "id_ID")).precision(.fractionLength(0))), "MB")
+        }
+        return (formattedGB(gb), "GB")
+    }
+
+    /// Same failure mode as `formattedSize(gb:)` above, same fix: a short
+    /// segment or just-started session under ~50 m rounds to a misleading
+    /// "0,0" at one-decimal km precision, so switch to metres below 1 km.
+    private func formattedDistance(km: Double) -> (value: String, unit: String) {
+        if km < 1 {
+            let m = km * 1000
+            return (m.formatted(.number.locale(Locale(identifier: "id_ID")).precision(.fractionLength(0))), "m")
+        }
+        return (formattedGB(km), "km")
+    }
+
+    private var doneDistanceKm: Double {
+        model.doneSessions.reduce(0) { $0 + $1.distanceKm }
+    }
+
+    private var doneSizeGB: Double {
+        model.doneSessions.reduce(0) { $0 + $1.sizeGB }
+    }
+
+    private var statRow: some View {
+        let doneSize = formattedSize(gb: doneSizeGB)
+        let doneDistance = formattedDistance(km: doneDistanceKm)
+        return VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                StatTile(title: "SESI SELESAI", value: "\(model.doneSessionsCount)", unit: "sesi")
+                Divider()
+                StatTile(title: "JARAK TERSURVEI", value: doneDistance.value, unit: doneDistance.unit)
+                Divider()
+                StatTile(title: "UKURAN DATA", value: doneSize.value, unit: doneSize.unit)
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+            .fixedSize(horizontal: false, vertical: true)
+
+            Divider()
+        }
+        .background(.background)
     }
 
     private var table: some View {
@@ -74,10 +123,10 @@ struct ReportsView: View {
                     Text(session.roadName).fontWeight(.semibold)
                     Text(subtitle(for: session))
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(session.gpsGapNote != nil ? .red : .secondary)
                 }
             }
-            .width(min: 200, ideal: 260)
+            .width(min: 200, ideal: 240)
 
             TableColumn("Surveyor", value: \.surveyor.name)
                 .width(min: 100, ideal: 130)
@@ -92,32 +141,20 @@ struct ReportsView: View {
             }
             .width(80)
 
-            // Not sortable on purpose: the count is derived from
-            // `parkingAnalyses`, not a stored field on Session, so there is no
-            // key path for Table to sort by without duplicating it onto the
-            // model just to satisfy the API.
-            TableColumn("Kendaraan") { session in
-                Text("\(analyses(for: session).count)")
-                    .font(.data(12))
-                    .foregroundStyle(.secondary)
-            }
-            .width(90)
-
-            TableColumn("Pelanggaran") { session in
-                let count = disturbances(for: session)
-                Text("\(count)")
-                    .font(.data(12, weight: count > 0 ? .bold : .regular))
-                    .foregroundStyle(count > 0 ? .red : .secondary)
+            TableColumn("Jejak GPS") { session in
+                gpsTrack(for: session)
             }
             .width(100)
 
-            TableColumn("") { session in
-                NavigationLink(value: session) {
-                    Text("Buka")
-                }
-                .buttonStyle(.link)
+            TableColumn("Ukuran", value: \.sizeGB) { session in
+                measurement(formattedSize(gb: session.sizeGB))
             }
-            .width(60)
+            .width(80)
+
+            TableColumn("Status") { session in
+                SessionStatusBadge(status: session.status)
+            }
+            .width(min: 110, ideal: 140)
         }
         .safeAreaInset(edge: .top, spacing: 0) { statRow }
         .contextMenu(forSelectionType: Session.ID.self) { ids in
@@ -132,50 +169,6 @@ struct ReportsView: View {
         }
     }
 
-    private var statRow: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 0) {
-                StatTile(title: "SESI SELESAI", value: "\(model.reportSessions.count)", unit: "sesi",
-                         detail: "\(model.surveyorCount) surveyor")
-                Divider()
-                StatTile(title: "PELANGGARAN", value: "\(model.disturbanceCount)", unit: nil,
-                         detail: "parkir dalam zona rambu",
-                         accent: model.disturbanceCount > 0 ? .red : .primary)
-                Divider()
-                StatTile(title: "KENDARAAN DIANALISIS", value: "\(model.totalVehiclesAnalyzed)", unit: nil)
-                Divider()
-                StatTile(title: "JARAK TERSURVEI", value: formattedDistance(km: reportedDistanceKm).value,
-                         unit: formattedDistance(km: reportedDistanceKm).unit)
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 14)
-
-            Divider()
-        }
-        .background(.bar)
-    }
-
-    /// Distance across finished sessions only — the whole-corpus
-    /// `model.totalDistanceKm` would count sessions still sitting in the inbox,
-    /// which have not been surveyed in any reportable sense yet.
-    private var reportedDistanceKm: Double {
-        model.reportSessions.reduce(0) { $0 + $1.distanceKm }
-    }
-
-    private func analyses(for session: Session) -> [ParkingAnalysis] {
-        model.parkingAnalyses[session.id] ?? []
-    }
-
-    private func disturbances(for session: Session) -> Int {
-        analyses(for: session).filter { $0.carCandidate?.disturbance == true }.count
-    }
-
-    private func subtitle(for session: Session) -> String {
-        var parts = [session.date, "\(session.clipCount) klip"]
-        if let segmentCount = session.segmentCount { parts.append("\(segmentCount) segmen") }
-        return parts.joined(separator: " · ")
-    }
-
     private func measurement(_ formatted: (value: String, unit: String)) -> some View {
         HStack(spacing: 2) {
             Text(formatted.value)
@@ -184,19 +177,22 @@ struct ReportsView: View {
         .font(.data(12))
     }
 
-    private func formattedNumber(_ value: Double) -> String {
-        value.formatted(.number.locale(Locale(identifier: "id_ID")).precision(.fractionLength(1)))
+    private func subtitle(for session: Session) -> String {
+        var parts = [session.date, "\(session.clipCount) klip"]
+        if let segmentCount = session.segmentCount { parts.append("\(segmentCount) segmen") }
+        if let gap = session.gpsGapNote { parts.append(gap) }
+        return parts.joined(separator: " · ")
     }
 
-    /// Same failure mode/fix as `SessionInboxView.formattedDistance(km:)`: a
-    /// short segment under ~50 m rounds to a misleading "0,0" at one-decimal
-    /// km precision, so switch to metres below 1 km.
-    private func formattedDistance(km: Double) -> (value: String, unit: String) {
-        if km < 1 {
-            let m = km * 1000
-            return (m.formatted(.number.locale(Locale(identifier: "id_ID")).precision(.fractionLength(0))), "m")
+    @ViewBuilder
+    private func gpsTrack(for session: Session) -> some View {
+        if let acc = session.gpsAccuracyM, let hz = session.gpsHz {
+            Text("±\(acc) m · \(Int(hz)) Hz").font(.data(12)).foregroundStyle(.green)
+        } else if session.gpsGapNote != nil {
+            Text("bolong").font(.data(12)).foregroundStyle(.red)
+        } else {
+            Text("—").font(.data(12)).foregroundStyle(.secondary)
         }
-        return (formattedNumber(km), "km")
     }
 }
 
