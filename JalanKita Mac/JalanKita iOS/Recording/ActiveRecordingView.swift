@@ -41,11 +41,13 @@ struct ActiveRecordingView: View {
         }
         .statusBarHidden()
         .task {
+            OrientationLock.apply(.landscape)
             await prepare()
         }
         .onDisappear {
             capture.stopPreview()
             location.stopLogging()
+            OrientationLock.apply(.all)
         }
     }
 
@@ -97,18 +99,6 @@ struct ActiveRecordingView: View {
                 .frame(height: 76)
             } else {
                 HStack(spacing: 24) {
-                    controlButton(
-                        systemImage: capture.state == .recording ? "pause.fill" : "play.fill",
-                        label: capture.state == .recording ? "Jeda" : "Lanjut",
-                        tint: .white
-                    ) {
-                        if capture.state == .recording {
-                            capture.pause()
-                        } else {
-                            capture.resume()
-                        }
-                    }
-
                     controlButton(systemImage: "stop.fill", label: "Berhenti", tint: .red) {
                         finish()
                     }

@@ -3,11 +3,14 @@
 //  JalanKita iOS
 //
 //  Owns the AVCaptureSession + AVCaptureMovieFileOutput for continuous
-//  dashcam-style recording. AVCaptureMovieFileOutput has no native
-//  pause/resume, so "pause" is implemented as ending the current clip file
-//  and "resume" as starting a new one — matching the existing desk app's
-//  `Session.clipCount` field, which already models a session as one or
-//  more clips rather than assuming exactly one file.
+//  dashcam-style recording. Every session is exactly one file, start to
+//  stop — there is deliberately no pause/resume: an earlier version
+//  implemented "pause" as ending the current clip and "resume" as starting
+//  a new one, but that let the Mac's car-tracking pipeline lose track
+//  continuity across the pause boundary (a car parked across a pause was
+//  seen as two separate, shorter tracks instead of one). Recording once,
+//  continuously, matches how a manually-uploaded video is always a single
+//  file too.
 //
 
 import AVFoundation
@@ -23,7 +26,7 @@ enum CaptureError: Error {
 @Observable
 final class CaptureSessionController: NSObject {
     enum State {
-        case idle, recording, paused
+        case idle, recording
     }
 
     private(set) var state: State = .idle
@@ -33,16 +36,25 @@ final class CaptureSessionController: NSObject {
     let session = AVCaptureSession()
     private let movieOutput = AVCaptureMovieFileOutput()
     private var sessionDirectory: URL?
-    private var clipIndex = 0
     private var elapsedTimer: Timer?
     private var recordingStartedAt: Date?
-    private var accumulatedElapsed: TimeInterval = 0
+
+    /// Tracks the physical device's rotation and hands back the correct
+    /// `AVCaptureConnection.videoRotationAngle` for it — Apple's own
+    /// replacement for hand-rolling a `UIDeviceOrientation` mapping, which is
+    /// a well-known source of off-by-90°/mirrored bugs. Landscape lock (see
+    /// `OrientationLock`) is what gets the surveyor to actually hold the
+    /// phone landscape; this is what makes the recorded file's own rotation
+    /// metadata agree with that, however either landscape direction the
+    /// phone ends up mounted in.
+    private var rotationCoordinator: AVCaptureDevice.RotationCoordinator?
+    private var rotationObservation: NSKeyValueObservation?
 
     /// True from the moment `movieOutput.stopRecording()` is called (by
-    /// either `pause()` or `stop()`) until the delegate confirms that clip
-    /// actually finished writing. `state` alone isn't enough to know this —
-    /// `pause()` flips `state` to `.paused` synchronously, well before the
-    /// clip file's async finalize actually completes.
+    /// `stop()`) until the delegate confirms the clip actually finished
+    /// writing. `state` alone isn't enough to know this — `stop()` flips
+    /// `state` to `.idle` synchronously, well before the clip file's async
+    /// finalize actually completes.
     private var isWaitingForClipToFinish = false
     private var stopRequestedAt: Date?
 
@@ -73,6 +85,24 @@ final class CaptureSessionController: NSObject {
         // regardless of clip length (it only finalizes the trailing
         // fragment since the last flushed fragment).
         movieOutput.movieFragmentInterval = CMTime(seconds: 10, preferredTimescale: 600)
+
+        let coordinator = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: nil)
+        rotationCoordinator = coordinator
+        applyRotationAngle(coordinator.videoRotationAngleForHorizonLevelCapture)
+        rotationObservation = coordinator.observe(\.videoRotationAngleForHorizonLevelCapture, options: [.new]) { [weak self] _, change in
+            guard let angle = change.newValue else { return }
+            Task { @MainActor in self?.applyRotationAngle(angle) }
+        }
+    }
+
+    /// Applied both on setup and on every subsequent device rotation (via
+    /// `rotationObservation` above) — the coordinator's angle can change at
+    /// any time the device rotates, not only once at configure time.
+    private func applyRotationAngle(_ angle: CGFloat) {
+        guard let connection = movieOutput.connection(with: .video),
+              connection.isVideoRotationAngleSupported(angle)
+        else { return }
+        connection.videoRotationAngle = angle
     }
 
     /// `AVCaptureSession.startRunning()` is a genuinely blocking call — it
@@ -94,45 +124,24 @@ final class CaptureSessionController: NSObject {
         Task.detached { [session] in session.stopRunning() }
     }
 
-    /// Begins recording into `directory`, creating `clip_0.mp4`.
+    /// Begins recording into `directory`, creating `clip_0.mov`.
     func startRecording(in directory: URL) {
         sessionDirectory = directory
-        clipIndex = 0
         clipURLs = []
-        accumulatedElapsed = 0
-        beginClip()
+        let url = directory.appendingPathComponent("clip_0.mov")
+        movieOutput.startRecording(to: url, recordingDelegate: self)
+        state = .recording
+        recordingStartedAt = Date()
+        startTimer()
     }
 
-    /// Ends the current clip file. Recording resumes into a new clip via `resume()`.
-    func pause() {
-        guard state == .recording else { return }
-        isWaitingForClipToFinish = true
-        stopRequestedAt = Date()
-        print("[CaptureSessionController] pause() -> stopRecording() called, waiting for finalize…")
-        movieOutput.stopRecording()
-        state = .paused
-        stopTimer()
-    }
-
-    func resume() {
-        guard state == .paused else { return }
-        clipIndex += 1
-        beginClip()
-    }
-
-    /// Ends the current clip and finalizes the whole recording. The
-    /// completion fires once the LAST clip file has actually finished
-    /// writing (AVCaptureFileOutput's delegate callback), so callers can
-    /// safely read `clipURLs`/the session directory there.
-    ///
-    /// Calling this right after `pause()` must NOT skip that wait just
-    /// because `state` is already `.paused` — `pause()`'s own
-    /// `stopRecording()` call may not have finished writing its clip yet,
-    /// and returning early here would race that write (wrong `clipURLs`
-    /// count, a directory scan that catches the file mid-write).
+    /// Ends the clip and finalizes the recording. The completion fires once
+    /// the clip file has actually finished writing (AVCaptureFileOutput's
+    /// delegate callback), so callers can safely read `clipURLs`/the
+    /// session directory there.
     func stop(completion: @escaping ([URL], TimeInterval) -> Void) {
-        guard state == .recording || state == .paused || isWaitingForClipToFinish else {
-            completion(clipURLs, accumulatedElapsed)
+        guard state == .recording || isWaitingForClipToFinish else {
+            completion(clipURLs, elapsedSeconds)
             return
         }
         stopTimer()
@@ -143,31 +152,12 @@ final class CaptureSessionController: NSObject {
             print("[CaptureSessionController] stopRecording() called, waiting for finalize…")
             movieOutput.stopRecording()
             state = .idle
-        } else if isWaitingForClipToFinish {
-            // A just-issued pause() is still finalizing its clip — the
-            // delegate callback below will fire the completion once that
-            // write actually finishes, same as the .recording branch.
-            state = .idle
-        } else {
-            // Paused, and that clip already finished writing — truly
-            // nothing left in flight, safe to finish right now.
-            state = .idle
-            let handler = pendingStopCompletion
-            pendingStopCompletion = nil
-            handler?(clipURLs, accumulatedElapsed)
         }
+        // else: already waiting on a prior stop() call's finalize — the delegate
+        // callback below will fire this new completion once that write finishes.
     }
 
     private var pendingStopCompletion: (([URL], TimeInterval) -> Void)?
-
-    private func beginClip() {
-        guard let sessionDirectory else { return }
-        let url = sessionDirectory.appendingPathComponent("clip_\(clipIndex).mov")
-        movieOutput.startRecording(to: url, recordingDelegate: self)
-        state = .recording
-        recordingStartedAt = Date()
-        startTimer()
-    }
 
     private func startTimer() {
         elapsedTimer?.invalidate()
@@ -180,15 +170,14 @@ final class CaptureSessionController: NSObject {
         elapsedTimer?.invalidate()
         elapsedTimer = nil
         if let recordingStartedAt {
-            accumulatedElapsed += Date().timeIntervalSince(recordingStartedAt)
+            elapsedSeconds = Date().timeIntervalSince(recordingStartedAt)
         }
         recordingStartedAt = nil
-        elapsedSeconds = accumulatedElapsed
     }
 
     private func tick() {
         guard let recordingStartedAt else { return }
-        elapsedSeconds = accumulatedElapsed + Date().timeIntervalSince(recordingStartedAt)
+        elapsedSeconds = Date().timeIntervalSince(recordingStartedAt)
     }
 }
 
@@ -210,7 +199,7 @@ extension CaptureSessionController: AVCaptureFileOutputRecordingDelegate {
             if let pendingStopCompletion {
                 self.pendingStopCompletion = nil
                 state = .idle
-                pendingStopCompletion(clipURLs, accumulatedElapsed)
+                pendingStopCompletion(clipURLs, elapsedSeconds)
             }
         }
     }

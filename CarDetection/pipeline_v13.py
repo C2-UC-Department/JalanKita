@@ -225,6 +225,13 @@ def main():
     cap = cv2.VideoCapture(args.input)
     if not cap.isOpened():
         sys.exit(f"Could not open {args.input}")
+    # Auto-rotate to display-upright. Portrait iPhone clips carry a rotation matrix, and
+    # without this the frames arrive sideways -- the detector still fires, on a rotated road.
+    # Mirrors RoadDamage/video_frames.py's identical fix for the same source footage.
+    try:
+        cap.set(cv2.CAP_PROP_ORIENTATION_AUTO, 1)
+    except Exception:  # noqa: BLE001 -- older OpenCV simply lacks the property
+        pass
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))

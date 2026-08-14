@@ -498,7 +498,7 @@ final class AppModel {
                                         isWarning: false), at: 0)
                 // No parked cars is not a reason to skip the road surface — stage 3
                 // shares the clip with v13 and nothing else.
-                await runRoadDamageStage(sessionID: sessionID, clipURLs: [videoURL], clipOffsets: [0])
+                await runRoadDamageStage(sessionID: sessionID, clipURL: videoURL)
                 activeUploadSessionID = nil
                 updateSessionStatus(sessionID, .done)
                 return
@@ -533,8 +533,7 @@ final class AppModel {
             pipelineSteps[sessionID]?[1].state = .done
             parkingAnalyses[sessionID] = analyses
 
-            let damageFrames = await runRoadDamageStage(
-                sessionID: sessionID, clipURLs: [videoURL], clipOffsets: [0])
+            let damageFrames = await runRoadDamageStage(sessionID: sessionID, clipURL: videoURL)
 
             activeUploadSessionID = nil
             // Only a total loss fails the session. OFRSNet failing on every car
@@ -586,11 +585,12 @@ final class AppModel {
 
     /// Real trigger for a synced session sitting at `.readyToProcess` —
     /// called from Session Inbox's batch "Proses" action and
-    /// `SessionDetailPanel`'s "Proses sekarang" button. Multi-clip sessions
-    /// run car detection PER CLIP and merge candidate lists — concatenating
-    /// clips first would reintroduce the lossy re-encode step the iOS
-    /// side's per-clip finalization (`movieFragmentInterval`) was chosen to
-    /// avoid.
+    /// `SessionDetailPanel`'s "Proses sekarang" button. `SessionVideoAssetBuilder`
+    /// returns zero-or-one URLs in practice — recording has no pause/resume
+    /// (see `CaptureSessionController`), so a session is always exactly one
+    /// clip, same as a manual upload. `clipURLs` stays an array only to
+    /// tolerate an old synced session that predates that change; only its
+    /// first element is ever processed.
     func startProcessing(sessionID: Session.ID) {
         guard let session = sessions.first(where: { $0.id == sessionID }) else { return }
         let clipURLs = SessionVideoAssetBuilder.clipURLs(for: session)
@@ -627,7 +627,7 @@ final class AppModel {
     func deleteSession(_ sessionID: Session.ID) {
         guard let session = sessions.first(where: { $0.id == sessionID }) else { return }
         let zoneID = surveyorZones[session.surveyor.name]
-        performLocalSessionCleanup(sessionID: sessionID, session: session)
+        performLocalSessionCleanup(sessionID: sessionID)
 
         if let zoneID {
             cloudKitSyncEngine.enqueueSessionDeletion(sessionID: sessionID, zoneID: zoneID)
@@ -639,11 +639,11 @@ final class AppModel {
     /// clean up locally without re-deleting it from CloudKit (it's already
     /// gone there). Called by `SyncedSessionIngestor.didDeleteSession`.
     func applyIncomingSessionDeletion(_ sessionID: Session.ID) {
-        guard let session = sessions.first(where: { $0.id == sessionID }) else { return }
-        performLocalSessionCleanup(sessionID: sessionID, session: session)
+        guard sessions.contains(where: { $0.id == sessionID }) else { return }
+        performLocalSessionCleanup(sessionID: sessionID)
     }
 
-    private func performLocalSessionCleanup(sessionID: Session.ID, session: Session) {
+    private func performLocalSessionCleanup(sessionID: Session.ID) {
         sessions.removeAll { $0.id == sessionID }
         parkingAnalyses.removeValue(forKey: sessionID)
         roadDamageFrames.removeValue(forKey: sessionID)
@@ -656,10 +656,6 @@ final class AppModel {
         try? fm.removeItem(at: Self.manualUploadsDir(sessionID: sessionID))
         try? fm.removeItem(at: Self.carDetectionWorkDir(sessionID: sessionID))
         try? fm.removeItem(at: Self.roadDamageWorkDir(sessionID: sessionID))
-        for clipIndex in 0..<session.clipCount {
-            try? fm.removeItem(at: Self.carDetectionWorkDir(sessionID: "\(sessionID)-clip\(clipIndex)"))
-            try? fm.removeItem(at: Self.roadDamageWorkDir(sessionID: "\(sessionID)-clip\(clipIndex)"))
-        }
     }
 
     /// Renames a manually-uploaded session (one with no `recordedDate` —
@@ -687,47 +683,41 @@ final class AppModel {
     }
 
     private func runSyncedSessionAnalysis(sessionID: String, clipURLs: [URL], zoneID: CKRecordZone.ID) async {
-        // Each clip's own v13 tracking run reports frame/second numbers
-        // relative to that clip alone (starting at 0:00) — this cumulative
-        // offset array is what turns those clip-relative numbers into one
-        // consistent session timeline for Tinjauan Parkir.
-        var clipOffsets: [Double] = []
-        var cumulativeOffset: Double = 0
-        for clipURL in clipURLs {
-            clipOffsets.append(cumulativeOffset)
-            cumulativeOffset += await Self.probeDurationSeconds(url: clipURL) ?? 0
-        }
+        // `clipURLs` is guaranteed non-empty by `startProcessing`'s guard. Recording has
+        // no pause/resume, so this is always exactly one clip going forward — `.first`
+        // rather than requiring a single-element array only to keep tolerating an old
+        // synced session that predates that change (see SessionVideoAssetBuilder).
+        guard let clipURL = clipURLs.first else { return }
 
         pipelineSteps[sessionID]?[0].state = .active
         logLines[sessionID, default: []].insert(LogLine(
             time: Self.logTimeFormatter.string(from: Date()),
-            message: "Memulai deteksi mobil (v13) untuk \(clipURLs.count) klip…", isWarning: false), at: 0)
-        var candidatePairs: [(candidate: CarCandidate, screenshotDir: URL, clipIndex: Int)] = []
-        for (clipIndex, clipURL) in clipURLs.enumerated() {
-            let workDir = Self.carDetectionWorkDir(sessionID: "\(sessionID)-clip\(clipIndex)")
-            do {
-                let detection = try await carDetectionService.detect(video: clipURL, workDir: workDir)
-                candidatePairs += detection.summary.carsDetectedParked.map { ($0, detection.screenshotDir, clipIndex) }
-            } catch {
-                logLines[sessionID, default: []].insert(LogLine(
-                    time: Self.logTimeFormatter.string(from: Date()),
-                    message: "Deteksi mobil gagal (klip \(clipIndex), sesi tersinkron): \(error.localizedDescription)",
-                    isWarning: true), at: 0)
-            }
-            updateSessionStatus(sessionID, .segmenting(progress: Double(clipIndex + 1) / Double(clipURLs.count) / 2))
+            message: "Memulai deteksi mobil (v13)…", isWarning: false), at: 0)
+        var candidates: [CarCandidate] = []
+        var screenshotDir: URL?
+        do {
+            let workDir = Self.carDetectionWorkDir(sessionID: sessionID)
+            let detection = try await carDetectionService.detect(video: clipURL, workDir: workDir)
+            candidates = detection.summary.carsDetectedParked
+            screenshotDir = detection.screenshotDir
+        } catch {
+            logLines[sessionID, default: []].insert(LogLine(
+                time: Self.logTimeFormatter.string(from: Date()),
+                message: "Deteksi mobil gagal (sesi tersinkron): \(error.localizedDescription)",
+                isWarning: true), at: 0)
         }
         pipelineSteps[sessionID]?[0].state = .done
         pipelineSteps[sessionID]?[0].detail = "selesai"
         pipelineSteps[sessionID]?[0].subProgress = 1.0
         logLines[sessionID, default: []].insert(LogLine(
             time: Self.logTimeFormatter.string(from: Date()),
-            message: "Deteksi mobil selesai — \(candidatePairs.count) kandidat terparkir.", isWarning: false), at: 0)
+            message: "Deteksi mobil selesai — \(candidates.count) kandidat terparkir.", isWarning: false), at: 0)
 
-        guard !candidatePairs.isEmpty else {
+        guard !candidates.isEmpty, let screenshotDir else {
             parkingAnalyses[sessionID] = []
             pipelineSteps[sessionID]?[1].detail = "tidak ada"
             // Same reasoning as the manual path: stage 3 does not depend on v13.
-            await runRoadDamageStage(sessionID: sessionID, clipURLs: clipURLs, clipOffsets: clipOffsets)
+            await runRoadDamageStage(sessionID: sessionID, clipURL: clipURL)
             activeUploadSessionID = nil
             updateSessionStatus(sessionID, .done)
             pushSessionStatus(sessionID: sessionID, zoneID: zoneID)
@@ -737,34 +727,32 @@ final class AppModel {
 
         pipelineSteps[sessionID]?[1].state = .active
         var analyses: [ParkingAnalysis] = []
-        for (index, pair) in candidatePairs.enumerated() {
-            let imagePath = pair.screenshotDir.appendingPathComponent(pair.candidate.fileClean)
-            let requestID = "\(sessionID)#\(pair.candidate.trackID)"
+        for (index, candidate) in candidates.enumerated() {
+            let imagePath = screenshotDir.appendingPathComponent(candidate.fileClean)
+            let requestID = "\(sessionID)#\(candidate.trackID)"
             do {
                 let result = try await inferenceService.analyze(imagePath: imagePath, requestID: requestID)
                 let analysis = ParkingAnalysis(
                     id: requestID, sessionID: sessionID, imageURL: imagePath,
                     imageWidth: result.imageWidth, imageHeight: result.imageHeight,
-                    summary: result.summary, bevPNGPath: result.bevPNGPath, carCandidate: pair.candidate,
-                    sessionRelativeSeconds: clipOffsets[pair.clipIndex] + pair.candidate.midSeconds
+                    summary: result.summary, bevPNGPath: result.bevPNGPath, carCandidate: candidate,
+                    sessionRelativeSeconds: candidate.midSeconds
                 )
                 analyses.append(analysis)
                 pushParkingResult(analysis, zoneID: zoneID)
             } catch {
                 logLines[sessionID, default: []].insert(LogLine(
                     time: Self.logTimeFormatter.string(from: Date()),
-                    message: "OFRSNet gagal untuk mobil #\(pair.candidate.trackID) (sesi tersinkron): \(error.localizedDescription)",
+                    message: "OFRSNet gagal untuk mobil #\(candidate.trackID) (sesi tersinkron): \(error.localizedDescription)",
                     isWarning: true), at: 0)
             }
-            pipelineSteps[sessionID]?[1].subProgress = Double(index + 1) / Double(candidatePairs.count)
-            pipelineSteps[sessionID]?[1].detail = "\(index + 1)/\(candidatePairs.count)"
-            updateSessionStatus(sessionID, .segmenting(progress: 0.5 + Double(index + 1) / Double(candidatePairs.count) / 2))
+            pipelineSteps[sessionID]?[1].subProgress = Double(index + 1) / Double(candidates.count)
+            pipelineSteps[sessionID]?[1].detail = "\(index + 1)/\(candidates.count)"
         }
         pipelineSteps[sessionID]?[1].state = .done
         parkingAnalyses[sessionID] = analyses
 
-        let damageFrames = await runRoadDamageStage(
-            sessionID: sessionID, clipURLs: clipURLs, clipOffsets: clipOffsets)
+        let damageFrames = await runRoadDamageStage(sessionID: sessionID, clipURL: clipURL)
 
         activeUploadSessionID = nil
         updateSessionStatus(sessionID, analyses.isEmpty && damageFrames.isEmpty
@@ -780,26 +768,19 @@ final class AppModel {
         await syncNow()
     }
 
-    /// Stage 3 for both video drivers: sample each clip on a fixed interval and
+    /// Stage 3 for both video drivers: sample the clip on a fixed interval and
     /// score every frame for road damage.
     ///
-    /// Deliberately takes the clips rather than anything v13 produced — this stage
+    /// Deliberately takes the clip rather than anything v13 produced — this stage
     /// shares only the footage with stages 1 and 2. It therefore runs even when v13
     /// found no parked cars at all, which is the case that would otherwise return
     /// early and skip it.
     ///
-    /// `clipOffsets` must line up index-for-index with `clipURLs`, the same running
-    /// total `runSyncedSessionAnalysis` builds for the parking vertical, so both
-    /// verticals' timestamps land on one axis. A single-clip manual upload passes
-    /// `[0]`.
-    ///
-    /// Never throws. A clip that fails is logged and skipped; the session's fate is
-    /// decided by its callers, which treat "no damage frames" as a success as long
-    /// as the parking stage produced something.
+    /// Never throws. A failure is logged; the session's fate is decided by its
+    /// callers, which treat "no damage frames" as a success as long as the parking
+    /// stage produced something.
     @discardableResult
-    private func runRoadDamageStage(sessionID: String,
-                                    clipURLs: [URL],
-                                    clipOffsets: [Double]) async -> [ReviewFrame] {
+    private func runRoadDamageStage(sessionID: String, clipURL: URL) async -> [ReviewFrame] {
         pipelineSteps[sessionID]?[2].state = .active
         logLines[sessionID, default: []].insert(LogLine(
             time: Self.logTimeFormatter.string(from: Date()),
@@ -807,41 +788,34 @@ final class AppModel {
             isWarning: false), at: 0)
 
         var frames: [ReviewFrame] = []
-        for (clipIndex, clipURL) in clipURLs.enumerated() {
-            // One work dir per clip, matching how v13's own output is laid out, so a
-            // multi-clip session's frames cannot collide on filename.
-            let workDir = clipURLs.count > 1
-                ? Self.roadDamageWorkDir(sessionID: "\(sessionID)-clip\(clipIndex)")
-                : Self.roadDamageWorkDir(sessionID: sessionID)
-            do {
-                frames += try await roadDamageService.analyzeVideo(
-                    videoURL: clipURL,
-                    sessionID: clipURLs.count > 1 ? "\(sessionID)#clip\(clipIndex)" : sessionID,
-                    intervalSec: roadDamageIntervalSeconds,
-                    hashThreshold: roadDamageSkipDuplicates ? Self.duplicateHashThreshold : 0,
-                    clipOffset: clipOffsets.indices.contains(clipIndex) ? clipOffsets[clipIndex] : 0,
-                    workDir: workDir,
-                    onExtract: { [weak self] progress in
-                        self?.pipelineSteps[sessionID]?[2].detail =
-                            "mengambil frame \(progress.framesDone)/\(progress.framesTotal)"
-                    },
-                    onManifest: { [weak self] manifest in
-                        guard manifest.rejectedDup > 0 || manifest.rejectedBlur > 0 else { return }
-                        self?.logLines[sessionID, default: []].insert(LogLine(
-                            time: Self.logTimeFormatter.string(from: Date()),
-                            message: "Frame dilewati: \(manifest.rejectedDup) nyaris identik, \(manifest.rejectedBlur) terlalu buram — \(manifest.kept) dianalisis.",
-                            isWarning: false), at: 0)
-                    },
-                    onFrame: { [weak self] done, total in
-                        self?.pipelineSteps[sessionID]?[2].detail = "\(done)/\(total)"
-                        self?.pipelineSteps[sessionID]?[2].subProgress = Double(done) / Double(total)
-                    })
-            } catch {
-                logLines[sessionID, default: []].insert(LogLine(
-                    time: Self.logTimeFormatter.string(from: Date()),
-                    message: "Deteksi kerusakan jalan gagal\(clipURLs.count > 1 ? " (klip \(clipIndex))" : ""): \(error.localizedDescription)",
-                    isWarning: true), at: 0)
-            }
+        do {
+            frames = try await roadDamageService.analyzeVideo(
+                videoURL: clipURL,
+                sessionID: sessionID,
+                intervalSec: roadDamageIntervalSeconds,
+                hashThreshold: roadDamageSkipDuplicates ? Self.duplicateHashThreshold : 0,
+                clipOffset: 0,
+                workDir: Self.roadDamageWorkDir(sessionID: sessionID),
+                onExtract: { [weak self] progress in
+                    self?.pipelineSteps[sessionID]?[2].detail =
+                        "mengambil frame \(progress.framesDone)/\(progress.framesTotal)"
+                },
+                onManifest: { [weak self] manifest in
+                    guard manifest.rejectedDup > 0 || manifest.rejectedBlur > 0 else { return }
+                    self?.logLines[sessionID, default: []].insert(LogLine(
+                        time: Self.logTimeFormatter.string(from: Date()),
+                        message: "Frame dilewati: \(manifest.rejectedDup) nyaris identik, \(manifest.rejectedBlur) terlalu buram — \(manifest.kept) dianalisis.",
+                        isWarning: false), at: 0)
+                },
+                onFrame: { [weak self] done, total in
+                    self?.pipelineSteps[sessionID]?[2].detail = "\(done)/\(total)"
+                    self?.pipelineSteps[sessionID]?[2].subProgress = Double(done) / Double(total)
+                })
+        } catch {
+            logLines[sessionID, default: []].insert(LogLine(
+                time: Self.logTimeFormatter.string(from: Date()),
+                message: "Deteksi kerusakan jalan gagal: \(error.localizedDescription)",
+                isWarning: true), at: 0)
         }
 
         pipelineSteps[sessionID]?[2].state = .done

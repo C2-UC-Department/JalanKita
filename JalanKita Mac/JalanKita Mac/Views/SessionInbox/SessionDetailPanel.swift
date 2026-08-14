@@ -9,8 +9,10 @@
 //  ratio for free.
 //
 
+import AppKit
 import SwiftUI
 import MapKit
+import UniformTypeIdentifiers
 import JalanKitaKit
 
 struct SessionDetailPanel: View {
@@ -19,6 +21,9 @@ struct SessionDetailPanel: View {
 
     @State private var coordinates: [CLLocationCoordinate2D] = []
     @State private var editedRoadName: String = ""
+    @State private var isExportingVideo = false
+    @State private var isExportingGPS = false
+    @State private var exportError: String?
 
     private var hasParkingResults: Bool {
         !(model.parkingAnalyses[session.id]?.isEmpty ?? true)
@@ -31,6 +36,25 @@ struct SessionDetailPanel: View {
     private var isReadyToProcess: Bool {
         if case .readyToProcess = session.status { return true }
         return false
+    }
+
+    /// The session's original source file on disk — synced-from-iPhone or
+    /// manually-uploaded alike, both are always exactly one file (see
+    /// `SessionVideoAssetBuilder`). Available as soon as the video exists,
+    /// independent of whether it's been processed yet — unlike "Buka
+    /// video", which needs real parking results to open.
+    private var exportSourceURL: URL? {
+        SessionVideoAssetBuilder.clipURLs(for: session).first
+    }
+
+    /// Same stable path `SessionGPSTrackLoader` already reads for the route
+    /// map above — only present for a synced session, `isSyncedSession`
+    /// gates the button the same way it gates the map.
+    private var gpsCSVSourceURL: URL? {
+        let url = AppModel.syncedSessionsDir()
+            .appendingPathComponent(session.id, isDirectory: true)
+            .appendingPathComponent("gps.csv")
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 
     var body: some View {
@@ -100,8 +124,85 @@ struct SessionDetailPanel: View {
                     .disabled(!hasParkingResults)
                 }
                 .controlSize(.large)
+
+                HStack(spacing: 10) {
+                    Button {
+                        exportFile(source: exportSourceURL, suggestedName: session.roadName,
+                                  defaultExtension: "mov", contentType: .movie, isExporting: $isExportingVideo)
+                    } label: {
+                        if isExportingVideo {
+                            ProgressView()
+                                .controlSize(.small)
+                                .frame(maxWidth: .infinity)
+                        } else {
+                            Label("Simpan video…", systemImage: "square.and.arrow.down")
+                                .frame(maxWidth: .infinity)
+                        }
+                    }
+                    .disabled(exportSourceURL == nil || isExportingVideo)
+
+                    if isSyncedSession {
+                        Button {
+                            exportFile(source: gpsCSVSourceURL, suggestedName: "\(session.roadName)-gps",
+                                      defaultExtension: "csv", contentType: .commaSeparatedText, isExporting: $isExportingGPS)
+                        } label: {
+                            if isExportingGPS {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .frame(maxWidth: .infinity)
+                            } else {
+                                Label("Simpan GPS…", systemImage: "location.viewfinder")
+                                    .frame(maxWidth: .infinity)
+                            }
+                        }
+                        .disabled(gpsCSVSourceURL == nil || isExportingGPS)
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
             }
             .padding(24)
+        }
+        .alert("Gagal menyimpan berkas", isPresented: .constant(exportError != nil), presenting: exportError) { _ in
+            Button("OK") { exportError = nil }
+        } message: { message in
+            Text(message)
+        }
+    }
+
+    /// Copies a file out of the app's internal storage to a location the
+    /// user picks — `NSSavePanel` directly rather than SwiftUI's
+    /// `.fileExporter`, which needs the whole file loaded into a
+    /// `FileDocument`/`FileWrapper` first; a dashcam clip can be hundreds of
+    /// MB to a few GB, and `FileManager.copyItem` streams straight from disk
+    /// to disk without ever holding it in memory. Shared by the video and
+    /// GPS-CSV buttons — same picker, same streamed copy, same error path,
+    /// only the source file and suggested name differ.
+    private func exportFile(source: URL?, suggestedName: String, defaultExtension: String,
+                            contentType: UTType, isExporting: Binding<Bool>) {
+        guard let sourceURL = source else { return }
+        let panel = NSSavePanel()
+        let ext = sourceURL.pathExtension.isEmpty ? defaultExtension : sourceURL.pathExtension
+        panel.nameFieldStringValue = "\(suggestedName).\(ext)"
+        panel.allowedContentTypes = UTType(filenameExtension: ext).map { [$0] } ?? [contentType]
+        panel.begin { response in
+            guard response == .OK, let destinationURL = panel.url else { return }
+            isExporting.wrappedValue = true
+            Task.detached(priority: .utility) {
+                let fm = FileManager.default
+                do {
+                    if fm.fileExists(atPath: destinationURL.path) {
+                        try fm.removeItem(at: destinationURL)
+                    }
+                    try fm.copyItem(at: sourceURL, to: destinationURL)
+                    await MainActor.run { isExporting.wrappedValue = false }
+                } catch {
+                    await MainActor.run {
+                        isExporting.wrappedValue = false
+                        exportError = error.localizedDescription
+                    }
+                }
+            }
         }
     }
 }

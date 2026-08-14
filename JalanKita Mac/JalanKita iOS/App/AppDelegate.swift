@@ -29,6 +29,13 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         print("[AppDelegate/iOS] didFailToRegisterForRemoteNotificationsWithError: \(error)")
     }
 
+    /// Consulted by the system on every rotation attempt — see
+    /// `OrientationLock`'s header comment for why the recording screen locks
+    /// this to `.landscape` while it's on screen.
+    func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
+        OrientationLock.mask
+    }
+
     func application(
         _ application: UIApplication,
         didReceiveRemoteNotification userInfo: [AnyHashable: Any],
