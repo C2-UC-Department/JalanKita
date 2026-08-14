@@ -74,6 +74,8 @@ from collections import defaultdict, deque
 
 import cv2
 import numpy as np
+
+from car_points import car_point_correspondences
 import torch
 import torchvision.transforms as T
 from ultralytics import YOLO
@@ -160,6 +162,17 @@ def estimate_fundamental_matrix(prev_gray, curr_gray, exclude_mask):
     return F
 
 
+def epipolar_residual_from_correspondences(F, p1, p2):
+    """Post-step half of car_epipolar_residual, split out so pipeline_v13.py can share one
+    car_point_correspondences() call between the epi and FoE branches (EFFICIENCY_PLAN.md S2).
+    Computes each point's perpendicular distance to the epipolar line F predicts for it and
+    returns the median distance across all points."""
+    lines2 = cv2.computeCorrespondEpilines(p1.reshape(-1, 1, 2), 1, F).reshape(-1, 3)
+    a, b, c = lines2[:, 0], lines2[:, 1], lines2[:, 2]
+    dist = np.abs(a * p2[:, 0] + b * p2[:, 1] + c) / np.sqrt(a * a + b * b)
+    return float(np.median(dist))
+
+
 def car_epipolar_residual(F, prev_gray, curr_gray, car_mask_u8):
     """Whole-mask consensus residual for one car: tracks up to CAR_POINT_MAX_FEATURES points
     found INSIDE the car's own segmentation mask (not its box) from prev_gray to curr_gray,
@@ -170,24 +183,10 @@ def car_epipolar_residual(F, prev_gray, curr_gray, car_mask_u8):
     consistent with the car being world-stationary. Large = the car's points are NOT explained
     by the background's motion -- real, independent motion. Returns None if too few points were
     found or survived tracking to trust a reading this frame (not a guess)."""
-    prev_pts = cv2.goodFeaturesToTrack(prev_gray, maxCorners=CAR_POINT_MAX_FEATURES, qualityLevel=0.01, minDistance=4, mask=car_mask_u8)
-    if prev_pts is None or len(prev_pts) < CAR_POINT_MIN_TRACKED:
+    corr = car_point_correspondences(prev_gray, curr_gray, car_mask_u8)
+    if corr is None:
         return None
-
-    curr_pts, status, err = cv2.calcOpticalFlowPyrLK(prev_gray, curr_gray, prev_pts, None)
-    status = status.reshape(-1).astype(bool)
-    p1, p2, err = prev_pts[status].reshape(-1, 2), curr_pts[status].reshape(-1, 2), err.reshape(-1)[status]
-    if len(p1) < CAR_POINT_MIN_TRACKED:
-        return None
-
-    keep_n = max(CAR_POINT_MIN_TRACKED, int(len(err) * CAR_POINT_KEEP_FRACTION))
-    keep_idx = np.argsort(err)[:keep_n]
-    p1, p2 = p1[keep_idx], p2[keep_idx]
-
-    lines2 = cv2.computeCorrespondEpilines(p1.reshape(-1, 1, 2), 1, F).reshape(-1, 3)
-    a, b, c = lines2[:, 0], lines2[:, 1], lines2[:, 2]
-    dist = np.abs(a * p2[:, 0] + b * p2[:, 1] + c) / np.sqrt(a * a + b * b)
-    return float(np.median(dist))
+    return epipolar_residual_from_correspondences(F, corr[0], corr[1])
 
 
 def mask_ground_point(mask_bool):

@@ -25,9 +25,13 @@ neighbor-sync logic, same v10 sign zones, same cross-track dedup, same confidenc
 """
 
 import argparse
+import json
 import os
 import sys
+import time
 from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 
 # Onedir PyInstaller builds place bundled `datas` under sys._MEIPASS (the
 # `_internal/` folder next to the executable), not next to a frozen module's
@@ -47,7 +51,8 @@ import torch
 from ultralytics import YOLO
 
 import demo_scan_v5 as v5
-from foe_signal import estimate_foe_and_static_flow, car_flow_points, car_foe_probability
+from foe_signal import estimate_foe_and_static_flow, car_foe_probability
+from car_points import car_point_correspondences
 import foe_signal as _foe_mod  # for the --frame-stride FOE_RANSAC_INLIER_THRESHOLD_PX rescale, see main()
 from road_completion import encroachment_ratio_v7
 from demo_scan_v6 import (
@@ -102,6 +107,48 @@ def apply_determinism_settings():
     torch.manual_seed(DETERMINISM_SEED)
     torch.set_num_threads(1)
     os.environ["PYTHONHASHSEED"] = str(DETERMINISM_SEED)
+    # EFFICIENCY_PLAN.md S0c: foe_signal.py's FoE RANSAC drew from an unseeded numpy generator --
+    # confirmed via S0b to be the actual cause of run-to-run verdict flips (PARKED vs
+    # TRAFFIC_STOPPED on IMG_0056's ground-truth car) that this whole function was supposed to
+    # prevent but didn't, since numpy was never covered here before.
+    _foe_mod.seed_rng(DETERMINISM_SEED)
+
+
+# --- EFFICIENCY_PLAN.md S0d: opt-in profiling / debug dump, zero cost and zero behavior change
+# when --profile / --debug-json aren't passed. Every span wraps an EXISTING call in place --
+# nothing is reordered, nothing is skipped, this only measures. See EFFICIENCY_PLAN.md Section 6
+# for how the recorded numbers are meant to be compared against the S1/S2 baselines.
+class _Profiler:
+    def __init__(self, enabled):
+        self.enabled = enabled
+        self.totals = defaultdict(float)
+        self.calls = defaultdict(int)
+
+    @contextmanager
+    def span(self, label):
+        if not self.enabled:
+            yield
+            return
+        t0 = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.totals[label] += time.perf_counter() - t0
+            self.calls[label] += 1
+
+    def report(self, wall_s, n_frames):
+        if not self.enabled:
+            return
+        accounted = sum(self.totals.values())
+        print(f"\n--- --profile ({n_frames} frames, {wall_s:.2f}s wall, "
+              f"{wall_s/max(1,n_frames)*1000:.1f} ms/frame) ---", file=sys.stderr)
+        for label in sorted(self.totals):
+            s = self.totals[label]
+            print(f"  {label:<32} {s:8.3f}s  {s/max(1,n_frames)*1000:7.1f} ms/frame  "
+                  f"{s/wall_s*100 if wall_s else 0:5.1f}%  ({self.calls[label]} calls)", file=sys.stderr)
+        rest = wall_s - accounted
+        print(f"  {'(unaccounted / rest)':<32} {rest:8.3f}s  {rest/max(1,n_frames)*1000:7.1f} ms/frame  "
+              f"{rest/wall_s*100 if wall_s else 0:5.1f}%", file=sys.stderr)
 
 
 # --- --frame-stride scaling helpers -----------------------------------------------------------
@@ -177,6 +224,17 @@ def main():
     parser.add_argument("--deterministic", action="store_true",
                          help="Force reproducible output: single-threaded CPU + fixed seeds "
                               "(overrides --device to cpu). Much slower.")
+    parser.add_argument("--mps-heavy-models", action="store_true",
+                         help="EFFICIENCY_PLAN.md 8.13-8.14: opt-in exception to --deterministic's "
+                              "CPU-forcing, scoped to ONLY MiDaS depth + YOLOP drivable-area (the two "
+                              "models measured to dominate runtime). ByteTrack, the sign detector, and "
+                              "every RNG/thread-count determinism setting are untouched -- this does not "
+                              "reopen the ByteTrack non-determinism risk apply_determinism_settings() "
+                              "exists to prevent. Measured divergence vs CPU: MiDaS max|delta|=0.00236, "
+                              "YOLOP mask differs by 1px/2073600. Not bit-identical -- T0 must still be "
+                              "verified per-clip before this is trusted, per Bagian 8.14's revised "
+                              "acceptance criteria. No effect unless --deterministic is also passed. "
+                              "Only applies when --depth-backend midas-small (the default).")
     parser.add_argument("--depth-backend", choices=["midas-small", "depth-anything"],
                          default="midas-small",
                          help="midas-small (default): ~2.5x faster, calibrated on one clip. "
@@ -192,9 +250,32 @@ def main():
                               "constant this flag touches; N>1 is unvalidated against ByteTrack's "
                               "and the sign tracker's own IoU/Kalman association, which cannot be "
                               "fixed by rescaling constants -- see docs/ for the validation clips.")
+    parser.add_argument("--profile", action="store_true",
+                         help="Print a per-stage timing breakdown to stderr on exit (EFFICIENCY_PLAN.md "
+                              "S0d). Zero effect on output -- research/verification flag only, "
+                              "JalanKita Mac never passes this.")
+    parser.add_argument("--debug-json", default=None,
+                         help="Write per-track epi/FoE reading sequences + gate/failure counters to "
+                              "this path (EFFICIENCY_PLAN.md S0d) -- the sharpest available fingerprint "
+                              "for proving a refactor didn't change what got fed into epi_history/"
+                              "foe_history, since the stdout table only shows post-smoothing state. "
+                              "Zero effect on output. JalanKita Mac never passes this.")
+    parser.add_argument("--max-frames", type=int, default=None,
+                         help="Stop after processing this many frames -- for fast timing iterations "
+                              "only. CHANGES VERDICTS vs. a full run (truncated track histories); "
+                              "never use this to produce a baseline for comparison.")
     args = parser.parse_args()
     if args.frame_stride < 1:
         parser.error("--frame-stride must be >= 1")
+
+    prof = _Profiler(args.profile)
+    # Populated only when --debug-json is set (S0d) -- raw per-reading sequences, at full
+    # precision, BEFORE they're smoothed into epi_history/foe_history's bounded deques. This is
+    # what S2's per-car LK dedupe verifies against: the stdout table rounds %stationary to :.0f
+    # and only shows post-smoothing state, so it can't detect a single dropped/altered reading.
+    debug_epi_readings = defaultdict(list) if args.debug_json else None
+    debug_foe_readings = defaultdict(list) if args.debug_json else None
+    debug_foe_frames = [] if args.debug_json else None
 
     if args.deterministic:
         apply_determinism_settings()
@@ -214,13 +295,18 @@ def main():
     _rdv.MIN_FRAMES_PER_TRACK = _scale_window(_rdv.MIN_FRAMES_PER_TRACK, args.frame_stride)
     _rdv.UNSTABLE_EGO_RATE = _scale_px(_rdv.UNSTABLE_EGO_RATE, args.frame_stride)
 
+    # EFFICIENCY_PLAN.md 8.13-8.14: --mps-heavy-models scopes the MPS exception to exactly these
+    # two models. car_model (ByteTrack) below is untouched -- it stays on whatever device YOLO's
+    # own default resolves to under --deterministic's thread/seed settings, same as always.
+    heavy_device = "mps" if (args.mps_heavy_models and args.depth_backend == "midas-small") else args.device
+
     car_model = YOLO(args.model)
     custom_model = YOLO(args.custom_model)
-    road_segmenter = v5.RoadSegmenter(torch.device(args.device))
+    road_segmenter = v5.RoadSegmenter(torch.device(heavy_device))
     # max_missed scaled here (before fps/width/height are known below) since SignTracker only
     # needs the stride itself, already parsed -- see the _scale_window family below for the rest.
     sign_tracker = SignTracker(max_missed=_scale_window(SIGN_TRACK_MAX_MISSED, args.frame_stride))
-    dpipe = load_fn(args.device if args.depth_backend == "depth-anything" else "cpu")
+    dpipe = load_fn(heavy_device if args.depth_backend == "midas-small" else args.device)
 
     cap = cv2.VideoCapture(args.input)
     if not cap.isOpened():
@@ -354,6 +440,12 @@ def main():
     frame_idx = 0
     native_idx = 0
     native_frame_number = []
+    wall_loop_start = time.perf_counter()
+    # EFFICIENCY_PLAN.md S1: the 4 CNN calls below are mutually independent (all read the same
+    # clean `frame`, no shared state, no RNG) and each already runs with
+    # torch.set_num_threads(1)/cv2.setNumThreads(1), so dispatching them across threads is
+    # bit-identical while collapsing critical path to roughly the slowest of the 4.
+    cnn_pool = ThreadPoolExecutor(max_workers=4)
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -366,13 +458,28 @@ def main():
         native_frame_number.append(native_idx)
         native_idx += 1
 
+        if args.max_frames is not None and frame_idx >= args.max_frames:
+            break
+
         placed_label_rects = []
 
-        car_result = car_model.track(
-            frame, classes=BACKGROUND_EXCLUDE_CLASSES, tracker="bytetrack.yaml", persist=True, verbose=False
-        )[0]
-        custom_result = custom_model.predict(frame, conf=CUSTOM_CONF_THRESHOLD, agnostic_nms=True, verbose=False)[0]
-        road_mask = road_segmenter.drivable_mask(frame)
+        with prof.span("01-04_cnn_parallel"):
+            f_car = cnn_pool.submit(
+                car_model.track, frame, classes=BACKGROUND_EXCLUDE_CLASSES,
+                tracker="bytetrack.yaml", persist=True, verbose=False
+            )
+            f_sign = cnn_pool.submit(
+                custom_model.predict, frame, conf=CUSTOM_CONF_THRESHOLD, agnostic_nms=True, verbose=False
+            )
+            f_road = cnn_pool.submit(road_segmenter.drivable_mask, frame)
+            f_depth = cnn_pool.submit(map_fn, dpipe, frame)
+
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+            car_result = f_car.result()[0]
+            custom_result = f_sign.result()[0]
+            road_mask = f_road.result()
+            depth, dscale = f_depth.result()
 
         # NOTE: gray/depth MUST be derived before draw_road_overlay mutates `frame` below.
         # draw_road_overlay() blends a 15% green tint over every drivable-area pixel via
@@ -386,9 +493,6 @@ def main():
         # same ordering (draw_road_overlay before cv2.cvtColor), so epi/FoE have carried the same
         # tinted-frame optical flow since before this file existed -- not touched here, flagged
         # to the user separately since fixing it would change historical results project-wide.
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        depth, dscale = map_fn(dpipe, frame)
-
         ok, enc = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, args.jpeg_quality])
         if ok:
             pristine_frame_cache[frame_idx] = enc.tobytes()
@@ -418,11 +522,11 @@ def main():
             polygons_all = list(masks.xy) if masks is not None else [None] * len(xyxy)
             for (x1, y1, x2, y2), cls_id, tid, poly, conf in zip(xyxy, cls_all, ids_all, polygons_all, conf_all):
                 if cls_id != v5.COCO_CAR_CLASS_ID:
-                    other_moving_mask_bools.append(v5.rasterize_mask_polygon(poly, gray.shape))
+                    mb = v5.rasterize_mask_polygon(poly, gray.shape)
+                    other_moving_mask_bools.append(mb)
                     # NEW: buses/trucks still get a depth reading (TARGET_VEHICLE_CLASSES), even
                     # though STOP_CLASS never applies to them (matches render_combined.py's scope).
                     if int(cls_id) in TARGET_VEHICLE_CLASSES:
-                        mb = v5.rasterize_mask_polygon(poly, gray.shape)
                         if mb.sum() >= MIN_CAR_MASK_PX:
                             ds = cv2.resize(mb.astype(np.uint8), (depth.shape[1], depth.shape[0]),
                                             interpolation=cv2.INTER_NEAREST) > 0
@@ -466,29 +570,35 @@ def main():
             roi_occupancy[mask_bool] += 1.0
 
         # --- depth ego-rate reference: LK on background points (same pattern as render_combined.py) ---
-        if prev_gray is not None:
-            bgm = (~prev_any_mover).astype(np.uint8) * 255
-            p0 = cv2.goodFeaturesToTrack(prev_gray, maxCorners=BG_MAX_CORNERS,
-                                         qualityLevel=BG_QUALITY, minDistance=BG_MIN_DISTANCE, mask=bgm)
-            if p0 is not None and len(p0) >= 20:
-                p1, st, _ = cv2.calcOpticalFlowPyrLK(prev_gray, gray, p0, None, **LK_PARAMS)
-                st = st.reshape(-1).astype(bool)
-                a, b = p0.reshape(-1, 2)[st], p1.reshape(-1, 2)[st]
-                if len(a) >= 20:
-                    za = sample_depth(prev_depth, a, prev_scale)
-                    zb = sample_depth(depth, b, dscale)
-                    v = np.isfinite(za) & np.isfinite(zb) & (za > 0) & (zb > 0)
-                    if v.sum() >= 20:
-                        ego_dz[frame_idx] = float(np.median(zb[v] - za[v]))
+        with prof.span("05_lk_global_depth_egorate"):
+            if prev_gray is not None:
+                bgm = (~prev_any_mover).astype(np.uint8) * 255
+                p0 = cv2.goodFeaturesToTrack(prev_gray, maxCorners=BG_MAX_CORNERS,
+                                             qualityLevel=BG_QUALITY, minDistance=BG_MIN_DISTANCE, mask=bgm)
+                if p0 is not None and len(p0) >= 20:
+                    p1, st, _ = cv2.calcOpticalFlowPyrLK(prev_gray, gray, p0, None, **LK_PARAMS)
+                    st = st.reshape(-1).astype(bool)
+                    a, b = p0.reshape(-1, 2)[st], p1.reshape(-1, 2)[st]
+                    if len(a) >= 20:
+                        za = sample_depth(prev_depth, a, prev_scale)
+                        zb = sample_depth(depth, b, dscale)
+                        v = np.isfinite(za) & np.isfinite(zb) & (za > 0) & (zb > 0)
+                        if v.sum() >= 20:
+                            ego_dz[frame_idx] = float(np.median(zb[v] - za[v]))
 
         F, foe_result = None, None
         sigma_foe = None
         if prev_gray is not None:
             frames_with_flow += 1
-            F = v5.estimate_fundamental_matrix(prev_gray, gray, all_cars_mask)
+            with prof.span("06_lk_global_fundamental"):
+                F = v5.estimate_fundamental_matrix(prev_gray, gray, all_cars_mask)
             if F is None:
                 fundamental_failures += 1
-            foe_result = estimate_foe_and_static_flow(prev_gray, gray, all_moving_objects_mask)
+            with prof.span("07_lk_global_foe"):
+                foe_result = estimate_foe_and_static_flow(prev_gray, gray, all_moving_objects_mask)
+            if debug_foe_frames is not None and foe_result is not None:
+                debug_foe_frames.append({"frame_idx": frame_idx, "foe_point": list(foe_result[0]),
+                                         "static_mean_flow_mag": foe_result[1], "k_local": foe_result[2]})
             if foe_result is not None:
                 candidate_foe_point, _, _ = foe_result
                 if prev_raw_foe_point is not None:
@@ -544,16 +654,23 @@ def main():
 
             car_mask_u8 = (mask_bool.astype(np.uint8)) * 255
 
+            corr = None
+            if contiguous and (F is not None or foe_result is not None):
+                with prof.span("08_lk_percar_corr"):
+                    corr = car_point_correspondences(prev_gray, gray, car_mask_u8)
+
             if F is not None and contiguous:
-                residual = v5.car_epipolar_residual(F, prev_gray, gray, car_mask_u8)
+                residual = None if corr is None else v5.epipolar_residual_from_correspondences(F, corr[0], corr[1])
                 if residual is not None:
                     epi_history[track_id].append(residual)
+                    if debug_epi_readings is not None:
+                        debug_epi_readings[track_id].append((frame_idx, residual))
                 else:
                     epi_reading_failures += 1
 
             if foe_result is not None and contiguous:
                 foe_point, static_mag, k_local = foe_result
-                pts_flows = car_flow_points(prev_gray, gray, car_mask_u8)
+                pts_flows = None if corr is None else (corr[0], corr[1] - corr[0])
                 if pts_flows is not None:
                     pts, flows = pts_flows
                     p_foe = car_foe_probability(foe_point, static_mag, pts, flows, k_local=k_local)
@@ -565,6 +682,8 @@ def main():
                         if confidence is None or confidence >= CONFIDENCE_GATE_FLOOR:
                             foe_history[track_id].append(p_foe)
                             foe_gate_admissions += 1
+                            if debug_foe_readings is not None:
+                                debug_foe_readings[track_id].append((frame_idx, p_foe, confidence))
                         else:
                             foe_gate_rejections += 1
                     else:
@@ -757,6 +876,10 @@ def main():
         if frame_idx % 50 == 0 or frame_idx == total_frames_expected:
             print(f"  processed {frame_idx}/{total_frames_expected} frames", file=sys.stderr)
 
+    cnn_pool.shutdown(wait=True)
+    wall_loop_s = time.perf_counter() - wall_loop_start
+    prof.report(wall_loop_s, frame_idx)
+
     cap.release()
     sign_tracker.finalize_all()
 
@@ -902,6 +1025,31 @@ def main():
     print(f"\nBackground fundamental matrix: failed on {fundamental_failures}/{frames_with_flow} frames")
     print(f"Background FoE estimation: failed on {foe_estimation_failures}/{frames_with_flow} frames")
     print(f"Phase 3A: {no_road_data_count} stationary-car frames had no drivable-area pixels at the car's ground row")
+
+    if args.debug_json:
+        # EFFICIENCY_PLAN.md S0d: these five counters were already being accumulated above (see
+        # epi_reading_failures etc.) but never printed anywhere -- this is what makes them visible.
+        # epi/foe readings are the raw per-frame values BEFORE the bounded smoothing deques, at
+        # full float precision -- the sharpest fingerprint available for S1/S2's bit-identity claims.
+        debug_payload = {
+            "counters": {
+                "epi_reading_failures": epi_reading_failures,
+                "foe_reading_failures": foe_reading_failures,
+                "foe_gate_admissions": foe_gate_admissions,
+                "foe_gate_rejections": foe_gate_rejections,
+                "foe_jump_rejections": foe_jump_rejections,
+                "fundamental_failures": fundamental_failures,
+                "foe_estimation_failures": foe_estimation_failures,
+                "frames_with_flow": frames_with_flow,
+                "n_disturbances": n_disturbances,
+            },
+            "epi_readings": {str(tid): readings for tid, readings in debug_epi_readings.items()},
+            "foe_readings": {str(tid): readings for tid, readings in debug_foe_readings.items()},
+            "foe_frames": debug_foe_frames,
+        }
+        with open(args.debug_json, "w") as f:
+            json.dump(debug_payload, f, indent=2)
+        print(f"\nWrote debug JSON to {args.debug_json}")
 
     # ---- NEW: demo screenshots -- one per PARKED car, at the MIDDLE frame of its observed span
     #      (farthest-to-nearest), full frame with box + final label, so the still image is
