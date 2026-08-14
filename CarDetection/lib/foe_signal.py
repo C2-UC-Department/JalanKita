@@ -45,6 +45,22 @@ classification pattern for direct, apples-to-apples comparison.
 import cv2
 import numpy as np
 
+from car_points import car_point_correspondences
+
+# Module-level so estimate_foe_and_static_flow's 200-pair RANSAC draw advances across frames
+# (unseeded default, matches historical CLI behavior) rather than being reset every call --
+# pipeline_v13.py's apply_determinism_settings() calls seed_rng() to make the draw sequence
+# reproducible under --deterministic. Confirmed via EFFICIENCY_PLAN.md S0b: 5 identical runs of
+# IMG_0056 produced a 60%/84% stationary split and a PARKED vs TRAFFIC_STOPPED verdict flip on
+# car#1 purely from this being unseeded -- everything else (frame count, depth reading, sign
+# zone) was byte-identical across runs.
+_rng = np.random.default_rng()
+
+
+def seed_rng(seed):
+    global _rng
+    _rng = np.random.default_rng(seed)
+
 # Background FoE estimation: same point budget as v5's fundamental-matrix background fit.
 FOE_MAX_FEATURES = 300
 FOE_MIN_MATCHES = 20
@@ -122,8 +138,7 @@ def estimate_foe_and_static_flow(prev_gray, curr_gray, exclude_mask):
     c = np.sum(normal * p1, axis=1)                                   # line: normal . X = c
 
     n_lines = len(p1)
-    rng = np.random.default_rng()
-    idx_pairs = rng.integers(0, n_lines, size=(FOE_RANSAC_ITERS, 2))
+    idx_pairs = _rng.integers(0, n_lines, size=(FOE_RANSAC_ITERS, 2))
     best_inlier_mask, best_count = None, -1
     for i, j in idx_pairs:
         if i == j:
@@ -165,23 +180,11 @@ def car_flow_points(prev_gray, curr_gray, car_mask_u8):
     reported at their PREVIOUS-frame position (flow origin), matching the convention a dense
     optical-flow field associates displacement with its source pixel. Returns (points, flows) as
     Nx2 arrays, or None if too few points survived tracking."""
-    prev_pts = cv2.goodFeaturesToTrack(prev_gray, maxCorners=CAR_POINT_MAX_FEATURES, qualityLevel=0.01, minDistance=4, mask=car_mask_u8)
-    if prev_pts is None or len(prev_pts) < CAR_POINT_MIN_TRACKED:
+    corr = car_point_correspondences(prev_gray, curr_gray, car_mask_u8)
+    if corr is None:
         return None
-
-    curr_pts, status, err = cv2.calcOpticalFlowPyrLK(prev_gray, curr_gray, prev_pts, None)
-    status = status.reshape(-1).astype(bool)
-    p1 = prev_pts[status].reshape(-1, 2)
-    p2 = curr_pts[status].reshape(-1, 2)
-    err = err.reshape(-1)[status]
-    if len(p1) < CAR_POINT_MIN_TRACKED:
-        return None
-
-    keep_n = max(CAR_POINT_MIN_TRACKED, int(len(err) * CAR_POINT_KEEP_FRACTION))
-    keep_idx = np.argsort(err)[:keep_n]
-    p1, p2 = p1[keep_idx], p2[keep_idx]
-    flow = p2 - p1
-    return p1, flow
+    p1, p2 = corr
+    return p1, p2 - p1
 
 
 def car_foe_probability(foe_point, static_mean_flow_mag, points, flows,

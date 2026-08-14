@@ -1,0 +1,37 @@
+# Ground-truth clip manifest for the efficiency-plan verification harness
+# (see ../EFFICIENCY_PLAN.md Section 6). Clips themselves are NOT committed to
+# this repo -- this file is what makes the harness reproducible without them.
+#
+# `expected_disturbances` is the known-correct answer this project's own
+# validation history established, not something this harness derives. IMG_0056
+# is the one clip with a real ground-truth violation; the other three are
+# real footage with zero true violations (used to catch FALSE positives, which
+# is the failure mode --frame-stride 2 demonstrated).
+
+[[clip]]
+label = "IMG_0056"
+path = "/Users/ignatiusiba/Documents/Code/challenge 2/v13/videos/source/IMG_0056.MOV"
+sha256 = "22688431b147210787e4f5473bb83464bbf0f756fcb5b832f29842519333fbc1"
+duration_s = 5.1
+expected_disturbances = 1
+
+[[clip]]
+label = "IMG_0057"
+path = "/Users/ignatiusiba/Documents/Code/challenge 2/v13/videos/source/IMG_0057.MOV"
+sha256 = "8474fb29708f8dfa0c1932fa8e8e20ab2b36d0db31901cafa261d58cefc0f9da"
+duration_s = 40.0
+expected_disturbances = 0
+
+[[clip]]
+label = "IMG_0063"
+path = "/Users/ignatiusiba/Documents/Code/challenge 2/v13/videos/source/IMG_0063.MOV"
+sha256 = "6b7bfd94b69140ff7a5a24716e49323a2cdae5a9a42adc661cab2a3a53eb128f"
+duration_s = 18.1
+expected_disturbances = 0
+
+[[clip]]
+label = "IMG_0065"
+path = "/Users/ignatiusiba/Documents/Code/challenge 2/v13/videos/source/IMG_0065.MOV"
+sha256 = "dffa0793fc7fe198c2dc419d9ed9b5da75971b1765ce6127732eb6a2625e50a8"
+duration_s = 34.8
+expected_disturbances = 0

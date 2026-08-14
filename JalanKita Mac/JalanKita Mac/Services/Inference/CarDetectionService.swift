@@ -35,11 +35,42 @@ final class CarDetectionService {
 
     private init() {}
 
+    // EFFICIENCY_PLAN.md 8.29-8.30: two `cardetection` processes running
+    // --mps-heavy-models at once can SIGSEGV or hang forever inside PyTorch's
+    // MPS shader-library cache, which isn't safe under concurrent process
+    // access. @MainActor does NOT serialize this on its own -- detect() creates
+    // a new worker per call, and once execution is past an `await` the actor is
+    // free to start another call, so two videos submitted close together really
+    // can launch two workers at the same time. This one-slot queue forces a
+    // single cardetection process at a time; a second video just waits its turn
+    // instead of racing the first one for the MPS shader cache.
+    private var isProcessing = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    private func acquireSlot() async {
+        if !isProcessing {
+            isProcessing = true
+            return
+        }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    private func releaseSlot() {
+        if waiters.isEmpty {
+            isProcessing = false
+        } else {
+            waiters.removeFirst().resume()
+        }
+    }
+
     /// Runs v13 on `video`, writing its screenshots + _summary.json into a
     /// subfolder of `workDir` (typically ~/Library/Application Support/...,
     /// keyed by session id so re-running never collides with another
     /// session's output).
     func detect(video: URL, workDir: URL) async throws -> CarDetectionResult {
+        await acquireSlot()
+        defer { releaseSlot() }
+
         let (executable, baseArguments, cwd) = try Self.resolveLaunch()
         let worker = CarDetectionWorkerProcess(executableURL: executable, baseArguments: baseArguments,
                                                workingDirectory: cwd)

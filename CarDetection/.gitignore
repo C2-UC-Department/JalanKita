@@ -5,3 +5,13 @@ build/
 dist/
 torch_hub_cache/
 *.spec.bak
+
+# EFFICIENCY_PLAN.md workflow: verification harness outputs (tools/record_run.py) --
+# annotated video + screenshots per baseline label, multi-GB, test artifacts not source.
+tools/baselines/
+tools/__pycache__/
+
+# Claude-written planning/log docs -- kept local, not shared (same convention as the
+# repo root's CLAUDE.md/JOURNAL.md/PROGRESS.md exclusion, see root .gitignore).
+EFFICIENCY_PLAN.md
+CHANGELOG_EFFICIENCY.md
