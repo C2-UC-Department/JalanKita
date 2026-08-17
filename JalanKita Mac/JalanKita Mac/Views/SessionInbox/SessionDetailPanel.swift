@@ -29,6 +29,7 @@ struct SessionDetailPanel: View {
     @State private var isLoadingPreview = true
     @State private var isRotating = false
     @State private var rotationError: String?
+    @State private var pendingReprocessConfirmation = false
 
     private var hasParkingResults: Bool {
         !(model.parkingAnalyses[session.id]?.isEmpty ?? true)
@@ -42,6 +43,12 @@ struct SessionDetailPanel: View {
         if case .readyToProcess = session.status { return true }
         return false
     }
+
+    /// Reprocessing only makes sense once there's a finished run to redo —
+    /// a session still `.readyToProcess`/`.segmenting` already has "Proses
+    /// sekarang" for that, and `.degraded`/`.failed` sessions aren't handled
+    /// here yet.
+    private var isDone: Bool { session.status == .done }
 
     /// The session's original source file on disk — synced-from-iPhone or
     /// manually-uploaded alike, both are always exactly one file (see
@@ -132,6 +139,15 @@ struct SessionDetailPanel: View {
                 }
                 .controlSize(.large)
 
+                if isDone {
+                    Button("Proses ulang…") {
+                        pendingReprocessConfirmation = true
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .frame(maxWidth: .infinity)
+                }
+
                 HStack(spacing: 10) {
                     Button {
                         exportFile(source: exportSourceURL, suggestedName: session.roadName,
@@ -179,6 +195,18 @@ struct SessionDetailPanel: View {
             Button("OK") { rotationError = nil }
         } message: { message in
             Text(message)
+        }
+        .alert("Proses ulang sesi ini?", isPresented: $pendingReprocessConfirmation) {
+            Button("Proses ulang", role: .destructive) {
+                model.reprocessSession(sessionID: session.id)
+                // The row is about to vanish from Laporan's `.done`-only list — land on
+                // Antrean instead of leaving this split pane pointed at nothing, same
+                // redirect processBatch() already uses after a batch "Proses".
+                model.selection = .queue
+            }
+            Button("Batal", role: .cancel) {}
+        } message: {
+            Text("Hasil analisis sebelumnya (deteksi mobil, gangguan parkir, kerusakan jalan) untuk sesi ini akan ditimpa.")
         }
     }
 

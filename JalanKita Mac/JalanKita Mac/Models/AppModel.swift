@@ -616,6 +616,83 @@ final class AppModel {
         }
     }
 
+    /// Re-runs the pipeline on a session that already finished once. Unlike `startProcessing`,
+    /// this has to actively undo the previous run's aftermath rather than assume a clean slate:
+    ///
+    /// - The old `ParkingResult` CloudKit records are keyed by `"\(sessionID)#\(trackID)"`, and
+    ///   the car tracker isn't guaranteed to hand out the same trackIDs on a second pass over the
+    ///   same video — so without an explicit delete, a reprocess would leave the old records
+    ///   behind as orphaned duplicates instead of being overwritten.
+    /// - `pushCompletedManualUploads` only ever pushes a manual-upload session once
+    ///   (`manualUploadsPushed` guards it) — a reprocessed manual upload needs that guard cleared
+    ///   or its new results would never leave this Mac.
+    ///
+    /// `runVideoAnalysis`/`runSyncedSessionAnalysis` themselves are reused unchanged: both already
+    /// overwrite `parkingAnalyses`/`roadDamageFrames` wholesale and already push the fresh
+    /// `ParkingResult`/Session status at completion, the same as any first-time run.
+    func reprocessSession(sessionID: Session.ID) {
+        guard let session = sessions.first(where: { $0.id == sessionID }) else { return }
+
+        let staleParkingResultIDs = (parkingAnalyses[sessionID] ?? []).map { analysis in
+            "\(sessionID)#\(analysis.carCandidate.map { String($0.trackID) } ?? analysis.id)"
+        }
+
+        parkingAnalyses[sessionID] = []
+        roadDamageFrames[sessionID] = []
+        pipelineSteps[sessionID] = Self.videoPipelineSteps
+        logLines[sessionID] = []
+        let fm = FileManager.default
+        try? fm.removeItem(at: Self.carDetectionWorkDir(sessionID: sessionID))
+        try? fm.removeItem(at: Self.roadDamageWorkDir(sessionID: sessionID))
+
+        if !staleParkingResultIDs.isEmpty {
+            if session.recordedDate != nil, let zoneID = surveyorZones[session.surveyor.name] {
+                cloudKitSyncEngine.enqueueParkingResultDeletion(recordIDs: staleParkingResultIDs, zoneID: zoneID)
+            } else if session.recordedDate == nil {
+                // Manual uploads broadcast to every known zone (pushCompletedManualUploads's own
+                // pattern) -- deleting a record in a zone that never had it is a harmless
+                // per-record no-op, so it's safe to target all of them the same way.
+                for zoneID in surveyorZones.values {
+                    cloudKitSyncEngine.enqueueParkingResultDeletion(recordIDs: staleParkingResultIDs, zoneID: zoneID)
+                }
+            }
+            Task { await syncNow() }
+        }
+
+        if session.recordedDate == nil {
+            manualUploadsPushed.remove(sessionID)
+        }
+
+        activeUploadSessionID = sessionID
+        updateSessionStatus(sessionID, .segmenting(progress: 0))
+        if session.recordedDate != nil {
+            let clipURLs = SessionVideoAssetBuilder.clipURLs(for: session)
+            guard !clipURLs.isEmpty, let zoneID = surveyorZones[session.surveyor.name] else {
+                logLines[sessionID, default: []].insert(LogLine(
+                    time: Self.logTimeFormatter.string(from: Date()),
+                    message: "Tidak bisa memproses ulang: berkas klip atau zona surveyor tidak ditemukan.",
+                    isWarning: true), at: 0)
+                updateSessionStatus(sessionID, .failed(reason: "Berkas sumber tidak ditemukan"))
+                return
+            }
+            Task {
+                await runSyncedSessionAnalysis(sessionID: sessionID, clipURLs: clipURLs, zoneID: zoneID)
+            }
+        } else {
+            guard let videoURL = SessionVideoAssetBuilder.clipURLs(for: session).first else {
+                logLines[sessionID, default: []].insert(LogLine(
+                    time: Self.logTimeFormatter.string(from: Date()),
+                    message: "Tidak bisa memproses ulang: berkas video sumber tidak ditemukan.",
+                    isWarning: true), at: 0)
+                updateSessionStatus(sessionID, .failed(reason: "Berkas video tidak ditemukan"))
+                return
+            }
+            Task {
+                await runVideoAnalysis(sessionID: sessionID, videoURL: videoURL)
+            }
+        }
+    }
+
     /// Removes a session and everything derived from it — the metadata
     /// (`parkingAnalyses`/`pipelineSteps`/`logLines`), and its on-disk video
     /// files, so a deleted session doesn't leave orphaned footage behind.

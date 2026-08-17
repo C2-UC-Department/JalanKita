@@ -222,6 +222,16 @@ final class CloudKitSyncEngine {
         outgoingDeletions[recordID] = zoneID.ownerName == CKCurrentUserDefaultName
     }
 
+    /// Queues one or more ParkingResult records for deletion without touching the Session
+    /// record itself — for reprocessing, where the session survives but its old results (keyed
+    /// by a car-tracker trackID that a re-run isn't guaranteed to reproduce) don't.
+    func enqueueParkingResultDeletion(recordIDs: [String], zoneID: CKRecordZone.ID) {
+        for name in recordIDs {
+            let recordID = CKRecord.ID(recordName: name, zoneID: zoneID)
+            outgoingDeletions[recordID] = zoneID.ownerName == CKCurrentUserDefaultName
+        }
+    }
+
     // MARK: - Sending
 
     /// A zone owned by `CKCurrentUserDefaultName` is one this Mac created
