@@ -19,14 +19,24 @@
 //  result off disk once the process exits -- no request/response protocol
 //  to speak, unlike InferenceWorkerProcess's `pending` continuation map.
 //
-//  Runs with --deterministic (forces single-threaded CPU, ~6 min per 5s
-//  clip) rather than the default --device mps. Confirmed directly during
-//  this integration: without --deterministic, ByteTrack's own run-to-run
-//  non-determinism (documented at length in this project's own history)
-//  can flip the one ground-truth violation clip's result from 1 disturbance
-//  to 0 between runs of the identical input -- unacceptable for a tool whose
-//  entire job is not missing violations. Slow-and-correct over fast-and-
-//  sometimes-wrong.
+//  Runs with --deterministic (forces single-threaded CPU + fixed seeds).
+//  Confirmed directly during this integration: without it, non-determinism
+//  from multi-threaded CPU float reduction order (NOT device selection --
+//  ByteTrack/car_model has never run on anything but CPU regardless of this
+//  flag; see EFFICIENCY_PLAN.md 8.15) can flip the one ground-truth
+//  violation clip's result from 1 disturbance to 0 between runs of the
+//  identical input -- unacceptable for a tool whose entire job is not
+//  missing violations. Slow-and-correct over fast-and-sometimes-wrong.
+//
+//  --mps-heavy-models (EFFICIENCY_PLAN.md 8.13-8.17): opt-in exception,
+//  scoped to ONLY the MiDaS depth + YOLOP drivable-area models (measured to
+//  be 75.6% of loop runtime pre-MPS). Does NOT touch ByteTrack or reopen the
+//  determinism risk above -- verified via a full 4-clip run: T0 (verdict)
+//  identical, T1 (depth_reading) shifts only in the last decimal digit.
+//  Cuts loop time ~2.87x (measured, IMG_0057 1202 frames: 467.6ms/frame ->
+//  162.7ms/frame). Passed unconditionally below; if a future divergence is
+//  ever found on a new clip, remove this one line to fall back to the
+//  fully-CPU path with zero other changes needed.
 //
 
 import Foundation
@@ -97,6 +107,7 @@ actor CarDetectionWorkerProcess {
             "--output", outputVideoPath.path,
             "--screenshot-dir", screenshotDir.path,
             "--deterministic",
+            "--mps-heavy-models",
         ]
         if let workingDirectory {
             process.currentDirectoryURL = workingDirectory
