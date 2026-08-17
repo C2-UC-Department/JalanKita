@@ -56,6 +56,7 @@ investigation — but it is **not** the fix. The fix is process isolation, and i
 from __future__ import annotations
 
 import argparse
+import bisect
 import csv
 import json
 import re
@@ -183,6 +184,8 @@ def dhash(gray: np.ndarray) -> int:
 
 def extract(video: Path, out_dir: Path, *, interval_sec: float = DEFAULT_INTERVAL_SEC,
             max_frames: int = 0, blur_thresh: float = 0.0, hash_thresh: int = 0,
+            gps_csv: Path | None = None, gps_max_gap: float = 5.0,
+            created_utc_override: str | None = None,
             on_progress=None) -> dict:
     """Sample `video` every `interval_sec` seconds into `out_dir`. Returns a manifest dict.
 
@@ -193,12 +196,29 @@ def extract(video: Path, out_dir: Path, *, interval_sec: float = DEFAULT_INTERVA
     `blur_thresh` and `hash_thresh` default to 0 (**disabled**). Enabling them makes the returned
     count smaller than `duration / interval`, which is fine as long as the caller reports it — the
     manifest carries `rejected_blur` and `rejected_dup` for exactly that.
+
+    `gps_csv`, when given, is a `time,lat,lon` track (same format `LocationTracker.swift` writes)
+    joined onto each frame's `wall_clock_iso` by nearest-neighbor within `gps_max_gap` seconds —
+    see `_nearest_gps`. A frame with no readable `wall_clock_iso`, or no fix within the gap, keeps
+    today's empty `lat`/`lon`/`gps_source="none"` rather than a guessed value.
+
+    `created_utc_override`, when given, replaces `read_creation_time(video)` outright rather than
+    supplementing it. Exists for exactly one caller: `RoadDamageService` on a manual upload that
+    went through "Putar kiri/kanan" (`SessionVideoAssetBuilder.rotateVideo`) before processing.
+    That rotation re-muxes the file through `AVAssetExportSession`, which does NOT carry the
+    original `mvhd` creation time forward — the output gets stamped with the moment of export
+    instead (confirmed by export-then-reread: the timestamp becomes "now", not the source's). Read
+    THIS file's atom at that point and every `wall_clock_iso` — and therefore every GPS-joined
+    coordinate — silently lands on the wrong day. The override is captured Swift-side via
+    AVFoundation at upload time, before any rotation can happen, and threaded down through
+    `worker_main.py --created-utc-override` to land here instead.
     """
     _pin_cv2_threads()
     meta = probe(video)
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = video.stem
-    created = read_creation_time(video)
+    created = created_utc_override or read_creation_time(video)
+    gps_track = _load_gps_track(gps_csv) if gps_csv else []
 
     step = max(1, int(round(meta["fps"] * interval_sec)))
     total = meta["frame_count"] or int(meta["fps"] * meta["duration_sec"])
@@ -246,11 +266,14 @@ def extract(video: Path, out_dir: Path, *, interval_sec: float = DEFAULT_INTERVA
                     cv2.imwrite(str(out_dir / name), frame,
                                 [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
                     h, w = frame.shape[:2]
+                    wall_clock_iso = _shift(created, pts)
+                    fix = _nearest_gps(gps_track, wall_clock_iso, gps_max_gap)
                     rows.append({
                         "frame_file": name, "source_video": video.name, "source_type": "video",
                         "frame_index": i, "pts_sec": round(pts, 3),
-                        "wall_clock_iso": _shift(created, pts),
-                        "lat": "", "lon": "", "alt_m": "", "gps_source": "none",
+                        "wall_clock_iso": wall_clock_iso,
+                        "lat": fix[0] if fix else "", "lon": fix[1] if fix else "",
+                        "alt_m": "", "gps_source": "nearest" if fix else "none",
                         "orientation": "portrait" if h >= w else "landscape",
                         "width": w, "height": h,
                         "blur_var": round(bv, 1) if blur_thresh else "",
@@ -291,6 +314,42 @@ def _shift(created_iso: str | None, seconds: float) -> str:
     return (base + timedelta(seconds=seconds)).isoformat().replace("+00:00", "Z")
 
 
+def _load_gps_track(path: Path) -> list[tuple[float, float, float]]:
+    """Parses a `time,lat,lon` CSV (same ISO-8601-Z format `LocationTracker.swift` writes) into
+    `(epoch_sec, lat, lon)` rows sorted by time. Malformed rows are skipped rather than raising —
+    one bad GPS fix must not sink the whole extraction."""
+    rows: list[tuple[float, float, float]] = []
+    with path.open(newline="") as fh:
+        for row in csv.DictReader(fh):
+            try:
+                ts = datetime.fromisoformat(row["time"].replace("Z", "+00:00"))
+                rows.append((ts.timestamp(), float(row["lat"]), float(row["lon"])))
+            except (KeyError, ValueError):
+                continue
+    rows.sort(key=lambda r: r[0])
+    return rows
+
+
+def _nearest_gps(track: list[tuple[float, float, float]], wall_clock_iso: str,
+                  max_gap: float) -> tuple[float, float] | None:
+    """Nearest-neighbor GPS fix for one frame's timestamp, or None if the closest fix is farther
+    than `max_gap` seconds away (or the track/timestamp is empty). Demo-grade on purpose — linear
+    interpolation between the two bracketing fixes would be more accurate but isn't needed for a
+    ~1 Hz demo track."""
+    if not track or not wall_clock_iso:
+        return None
+    target = datetime.fromisoformat(wall_clock_iso.replace("Z", "+00:00")).timestamp()
+    times = [r[0] for r in track]
+    i = bisect.bisect_left(times, target)
+    candidates = [c for c in (i - 1, i) if 0 <= c < len(track)]
+    if not candidates:
+        return None
+    best = min(candidates, key=lambda c: abs(track[c][0] - target))
+    if abs(track[best][0] - target) > max_gap:
+        return None
+    return track[best][1], track[best][2]
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -301,11 +360,20 @@ def main() -> None:
     ap.add_argument("--max-frames", type=int, default=0, help="cap by widening the stride")
     ap.add_argument("--blur-thresh", type=float, default=0.0, help="0 disables (default)")
     ap.add_argument("--hash-thresh", type=int, default=0, help="0 disables (default)")
+    ap.add_argument("--gps-csv", help="time,lat,lon track to join onto each frame (optional)")
+    ap.add_argument("--gps-max-gap", type=float, default=5.0,
+                    help="max seconds between a frame and its nearest GPS fix (default 5.0)")
+    ap.add_argument("--created-utc-override",
+                    help="replace the file's own mvhd creation time (ISO-8601 UTC) — see extract()'s "
+                         "doc comment on why a rotated file's own atom can no longer be trusted")
     args = ap.parse_args()
 
     manifest = extract(Path(args.video).expanduser(), Path(args.out).expanduser(),
                        interval_sec=args.interval, max_frames=args.max_frames,
                        blur_thresh=args.blur_thresh, hash_thresh=args.hash_thresh,
+                       gps_csv=Path(args.gps_csv).expanduser() if args.gps_csv else None,
+                       gps_max_gap=args.gps_max_gap,
+                       created_utc_override=args.created_utc_override,
                        on_progress=lambda done, total:
                        print(f"  {done}/{total}", file=sys.stderr))
     manifest_out = dict(manifest)

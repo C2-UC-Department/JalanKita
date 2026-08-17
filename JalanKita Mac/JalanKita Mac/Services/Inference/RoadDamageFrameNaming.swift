@@ -6,13 +6,14 @@
 //  in this vertical: `video_frames.py`'s `<clip>_f<index:06d>_t<ms:07d>.jpg`, e.g.
 //  `IMG_0040_f000030_t0001000.jpg`.
 //
-//  ⚠️ That name is the ONLY carrier of a frame's provenance. The extractor writes a
-//  `frames_provenance.csv` beside the frames, but nothing in the app reads it — the
-//  worker is handed one image path at a time and answers about that image alone, so
-//  by the time a response comes back the filename is all there is. Change
+//  ⚠️ That name is the ONLY carrier of a frame's provenance THROUGH the analysis
+//  worker — it's handed one image path at a time and answers about that image alone,
+//  so by the time a response comes back the filename is all there is. Change
 //  `video_frames.py:100` without changing these and frames silently lose their frame
 //  number, their timecode, and their place on the session timeline; nothing throws,
-//  the ticks just stop appearing.
+//  the ticks just stop appearing. (`frames_provenance.csv` itself IS read now, but
+//  separately and earlier — `RoadDamageFrameProvenance` loads its GPS columns right
+//  after extraction, before any frame goes through the worker this file is about.)
 //
 //  These four functions were the only part of the 376-line `RoadDamageDataset` worth
 //  keeping when the Stage 0 dataset browser was dropped along with the Peninjauan

@@ -39,7 +39,8 @@ final class RoadDamageService {
     /// duplicates it in the queue.
     func analyze(imageURL: URL,
                  requestID: String = UUID().uuidString,
-                 clipOffset: Double = 0) async throws -> ReviewFrame {
+                 clipOffset: Double = 0,
+                 coordinate: String? = nil) async throws -> ReviewFrame {
         let worker = try await ensureStarted()
 
         // Arm the deadline before the send, disarm it however the send ends. The
@@ -70,7 +71,8 @@ final class RoadDamageService {
             throw RoadDamageWorkerError.requestFailed(
                 response.error ?? "Analisis kerusakan jalan gagal tanpa pesan kesalahan.")
         }
-        return Self.makeFrame(from: response, imageURL: imageURL, clipOffset: clipOffset)
+        return Self.makeFrame(from: response, imageURL: imageURL, clipOffset: clipOffset,
+                             coordinate: coordinate)
     }
 
     /// Samples a clip into frames, then analyses each one through the warm worker.
@@ -101,13 +103,16 @@ final class RoadDamageService {
                       intervalSec: Double = 5.0,
                       hashThreshold: Int = 0,
                       clipOffset: Double = 0,
+                      gpsCSV: URL? = nil,
+                      createdUTCOverride: Date? = nil,
                       workDir: URL,
                       onExtract: ((RoadDamageVideoProgress) -> Void)? = nil,
                       onManifest: ((RoadDamageVideoManifest) -> Void)? = nil,
                       onFrame: ((Int, Int) -> Void)? = nil) async throws -> [ReviewFrame] {
         let manifest = try await RoadDamageVideoProcess.extract(
             video: videoURL, outputDir: workDir,
-            intervalSec: intervalSec, hashThreshold: hashThreshold,
+            intervalSec: intervalSec, hashThreshold: hashThreshold, gpsCSV: gpsCSV,
+            createdUTCOverride: createdUTCOverride,
             onProgress: onExtract)
         // Surfaced rather than swallowed: `rejectedDup`/`rejectedBlur` are how the
         // operator finds out whether the dedup threshold is doing anything useful
@@ -115,6 +120,12 @@ final class RoadDamageService {
         onManifest?(manifest)
 
         guard !manifest.frames.isEmpty else { return [] }
+
+        // Empty when `gpsCSV` was nil or the extractor matched nothing — a missing
+        // entry below just means this frame's `coordinate` stays nil, same as before
+        // this lookup existed.
+        let coordinates = RoadDamageFrameProvenance.loadCoordinates(
+            provenanceCSV: URL(fileURLWithPath: manifest.provenance))
 
         var frames: [ReviewFrame] = []
         var failures: [String] = []
@@ -126,7 +137,8 @@ final class RoadDamageService {
                 // is unique in flight.
                 frames.append(try await analyze(imageURL: url,
                                                 requestID: "\(sessionID)#\(index)",
-                                                clipOffset: clipOffset))
+                                                clipOffset: clipOffset,
+                                                coordinate: coordinates[url.lastPathComponent]))
             } catch {
                 failures.append(url.lastPathComponent)
             }
@@ -329,7 +341,7 @@ final class RoadDamageService {
     /// entry-point mode. `build_worker.sh` stamps the worker's value into
     /// `WORKER_CONTRACT` beside the frozen binary, and a mismatch demotes that tier
     /// rather than letting it serve stale inference.
-    static let expectedWorkerContract = "2026-08-13.extent+video"
+    static let expectedWorkerContract = "2026-08-17.created-utc-override"
 
     /// The contract stamped beside a frozen worker, or nil for a build that predates
     /// stamping — which is itself a mismatch, and deliberately so.
@@ -370,11 +382,14 @@ final class RoadDamageService {
     ///
     /// An ad-hoc photo carries none of the extractor's provenance — no source clip,
     /// no decoder frame index, no presentation timestamp — so those fall back to the
-    /// filename and em-dashes rather than invented values, and GPS stays nil because
-    /// the footage genuinely has none.
+    /// filename and em-dashes rather than invented values. `coordinate` is likewise
+    /// nil unless the caller resolved one from `frames_provenance.csv` (only possible
+    /// for a sampled video frame whose session had a GPS track) — see
+    /// `RoadDamageFrameProvenance`.
     private static func makeFrame(from response: RoadDamageResponse,
                                   imageURL: URL,
-                                  clipOffset: Double = 0) -> ReviewFrame {
+                                  clipOffset: Double = 0,
+                                  coordinate: String? = nil) -> ReviewFrame {
         let score = response.condition ?? 98
         let boxes = response.boxes ?? []
         let stem = imageURL.deletingPathExtension().lastPathComponent
@@ -436,7 +451,9 @@ final class RoadDamageService {
             sessionRelativeSeconds: sessionSeconds,
             segmentLabel: nil,
             kmMarker: nil,
-            coordinate: nil,
+            coordinate: coordinate,
+            // This CSV format (`time,lat,lon`) carries no accuracy figure — stays nil
+            // rather than a fabricated value. Revisit if a future GPS source adds one.
             gpsAccuracyM: nil,
             findings: findings,
             startScore: response.startScore ?? 100,

@@ -122,9 +122,13 @@ struct SessionDetailPanel: View {
                 Spacer(minLength: 12)
 
                 HStack(spacing: 10) {
-                    if isSyncedSession, isReadyToProcess {
+                    if isReadyToProcess {
                         Button("Proses sekarang") {
-                            model.startProcessing(sessionID: session.id)
+                            if isSyncedSession {
+                                model.startProcessing(sessionID: session.id)
+                            } else {
+                                model.startManualVideoProcessing(sessionID: session.id)
+                            }
                         }
                         .buttonStyle(.borderedProminent)
                         .frame(maxWidth: .infinity)

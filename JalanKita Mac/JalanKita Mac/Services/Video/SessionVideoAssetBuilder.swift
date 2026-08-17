@@ -42,6 +42,31 @@ enum SessionVideoAssetBuilder {
         return AVURLAsset(url: url)
     }
 
+    /// The file's own recording timestamp (QuickTime `com.apple.quicktime.creationdate`
+    /// / `mvhd`), read via AVFoundation rather than `RoadDamage/video_frames.py`'s raw
+    /// atom parser — this needs to run from Swift, at upload time, before anything else
+    /// touches the file.
+    ///
+    /// ⚠️ That timing matters and is the whole reason this exists as a separate read
+    /// instead of just trusting `RoadDamageVideoManifest.createdUtc` (stage 3's own read
+    /// of the same atom): **`rotateVideo` below destroys this timestamp**. Confirmed by
+    /// export/re-read — `AVAssetExportSession` with `.passthrough` does not carry the
+    /// source's creation date forward; the output's `mvhd` gets stamped with the moment
+    /// of export instead. A user who rotates a tilted upload before "Proses sekarang"
+    /// (the button exists in Sesi Masuk's preview specifically for this) silently loses
+    /// the one value `FindingsMapView`'s manual-upload GPS join depends on if that join
+    /// reads the atom AFTER rotation. Reading it here, at upload — before any rotation
+    /// can happen — and having `AppModel` cache the result is what keeps the join correct
+    /// through a rotate. It cannot help a file that was ALREADY re-exported by something
+    /// outside this app before it ever reached "Video + GPS (demo)…": that timestamp is
+    /// gone before this function ever sees the file, and no read here or anywhere else
+    /// recovers it.
+    static func creationDate(of url: URL) async -> Date? {
+        let asset = AVURLAsset(url: url)
+        guard let item = try? await asset.load(.creationDate) else { return nil }
+        return try? await item.load(.value) as? Date
+    }
+
     enum RotationError: LocalizedError {
         case noVideo
         case noVideoTrack

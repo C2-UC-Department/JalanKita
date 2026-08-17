@@ -94,6 +94,11 @@ struct RoadDamageVideoProgress: Sendable {
 }
 
 enum RoadDamageVideoProcess {
+    /// `2026-08-14T01:44:23Z` — whole seconds, `Z` suffix, matching
+    /// `read_creation_time`'s own `dt.isoformat().replace("+00:00", "Z")`
+    /// exactly, since `_shift` parses this same format back on the Python side.
+    private static let isoFormatter = ISO8601DateFormatter()
+
     /// Samples `video` every `intervalSec` seconds into `outputDir`.
     ///
     /// `onProgress` fires on the main actor per kept frame. Extraction is fast
@@ -130,6 +135,8 @@ enum RoadDamageVideoProcess {
                         intervalSec: Double,
                         maxFrames: Int = 0,
                         hashThreshold: Int = 0,
+                        gpsCSV: URL? = nil,
+                        createdUTCOverride: Date? = nil,
                         onProgress: ((RoadDamageVideoProgress) -> Void)? = nil)
         async throws -> RoadDamageVideoManifest {
 
@@ -141,6 +148,16 @@ enum RoadDamageVideoProcess {
         }
         if hashThreshold > 0 {
             mode += ["--hash-thresh", String(hashThreshold)]
+        }
+        if let gpsCSV {
+            mode += ["--gps-csv", gpsCSV.path]
+        }
+        if let createdUTCOverride {
+            // See `video_frames.extract`'s doc comment on `created_utc_override`:
+            // needed whenever this file went through "Putar kiri/kanan" before
+            // processing, which re-stamps the container's own mvhd to the moment
+            // of export rather than carrying the original recording time forward.
+            mode += ["--created-utc-override", Self.isoFormatter.string(from: createdUTCOverride)]
         }
         let (executable, arguments, workingDirectory) =
             try RoadDamageService.resolveLaunch(mode: mode)

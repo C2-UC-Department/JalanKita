@@ -53,7 +53,7 @@ struct SidebarView: View {
         case .queue: model.queuedSessions.count
         case .reports: model.doneSessionsCount
         case .surveyors: model.surveyorCount
-        case .mapSegments, .calibration, .cloudSync: 0
+        case .mapSegments, .findingsMap, .calibration, .cloudSync: 0
         }
     }
 }

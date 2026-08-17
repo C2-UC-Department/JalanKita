@@ -80,6 +80,8 @@ struct ContentView: View {
             ProcessingQueueView(model: model)
         case .mapSegments:
             MapSegmentsView(model: model)
+        case .findingsMap:
+            FindingsMapView(model: model)
         case .reports:
             ReportsView(model: model)
         case .cloudSync:

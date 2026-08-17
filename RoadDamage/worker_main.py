@@ -131,7 +131,7 @@ def severity_config_path() -> Path:
 #: ⚠️ Bump this whenever the worker gains or loses a capability the app depends on, and the app's
 #: `RoadDamageService.expectedWorkerContract` with it. A mismatch makes the app skip the frozen
 #: worker and say so, instead of running last week's inference and looking fine.
-WORKER_CONTRACT = "2026-08-13.extent+video"
+WORKER_CONTRACT = "2026-08-17.created-utc-override"
 
 # Matches prelabel_report.json — the run that produced the Stage 0 CSVs.
 DEFAULT_CONF = 0.20
@@ -465,6 +465,15 @@ def main() -> None:
     ap.add_argument("--blur-thresh", type=float, default=0.0,
                     help="Laplacian variance below which a frame is rejected as "
                          "too blurry; 0 disables (--extract-video)")
+    ap.add_argument("--gps-csv",
+                    help="time,lat,lon track joined onto each frame by nearest-neighbor "
+                         "(--extract-video)")
+    ap.add_argument("--gps-max-gap", type=float, default=5.0,
+                    help="max seconds between a frame and its nearest GPS fix before the "
+                         "frame is left without one (default 5.0, --extract-video)")
+    ap.add_argument("--created-utc-override",
+                    help="replace the clip's own mvhd creation time (ISO-8601 UTC); see "
+                         "video_frames.extract()'s doc comment (--extract-video)")
     args = ap.parse_args()
 
     if args.extract_video:
@@ -483,6 +492,9 @@ def main() -> None:
             Path(args.extract_video), Path(args.out),
             interval_sec=args.interval, max_frames=args.max_frames,
             blur_thresh=args.blur_thresh, hash_thresh=args.hash_thresh,
+            gps_csv=Path(args.gps_csv) if args.gps_csv else None,
+            gps_max_gap=args.gps_max_gap,
+            created_utc_override=args.created_utc_override,
             on_progress=lambda done, total: _emit(
                 {"type": "progress", "stage": "extract", "state": "active",
                  "done": done, "total": total}),

@@ -21,10 +21,34 @@ struct SessionInboxView: View {
     @State private var selection: Session.ID?
     @State private var searchText = ""
     @State private var sortOrder = [KeyPathComparator(\Session.roadName)]
-    @State private var showingPhotoImporter = false
-    @State private var showingVideoImporter = false
     @State private var importError: String?
     @State private var pendingDeletionID: Session.ID?
+
+    // Single `.fileImporter` shared by every "Unggah…" menu item, dispatched by
+    // `pendingImport`. Stacking several `.fileImporter` modifiers on one view (this
+    // had 2, briefly grew to 4 while adding the GPS demo flow below) turned out to
+    // silently break presentation for ALL of them, old and new alike — not just a
+    // theoretical SwiftUI quirk, reproduced directly: the pre-existing "Video…" item
+    // stopped opening its panel too. One importer + one dispatch enum is the fix,
+    // and is also just a smaller surface than four independently-toggled booleans.
+    private enum PendingImport {
+        case photo
+        case video
+        /// First half of the demo "Video + GPS" pairing — see `handleImport`'s
+        /// `.videoForGPS` case for how this transitions to `.gpsCSV`.
+        case videoForGPS
+        case gpsCSV(video: URL)
+    }
+    @State private var showingImporter = false
+    @State private var pendingImport: PendingImport = .photo
+
+    private var importerContentTypes: [UTType] {
+        switch pendingImport {
+        case .photo: [.image]
+        case .video, .videoForGPS: [.movie]
+        case .gpsCSV: [.commaSeparatedText, .plainText]
+        }
+    }
 
     private var filteredSessions: [Session] {
         let visible = model.sessions.filter { $0.status != .done }
@@ -65,18 +89,16 @@ struct SessionInboxView: View {
             }
             ToolbarItem(placement: .primaryAction) {
                 Menu {
-                    Button("Foto…") { showingPhotoImporter = true }
-                    Button("Video…") { showingVideoImporter = true }
+                    Button("Foto…") { pendingImport = .photo; showingImporter = true }
+                    Button("Video…") { pendingImport = .video; showingImporter = true }
+                    Button("Video + GPS (demo)…") { pendingImport = .videoForGPS; showingImporter = true }
                 } label: {
                     Label("Unggah…", systemImage: "square.and.arrow.up")
                 }
             }
         }
-        .fileImporter(isPresented: $showingPhotoImporter, allowedContentTypes: [.image]) { result in
-            handlePhotoImport(result)
-        }
-        .fileImporter(isPresented: $showingVideoImporter, allowedContentTypes: [.movie]) { result in
-            handleVideoImport(result)
+        .fileImporter(isPresented: $showingImporter, allowedContentTypes: importerContentTypes) { result in
+            handleImport(result)
         }
         .alert("Unggah gagal", isPresented: .constant(importError != nil), presenting: importError) { _ in
             Button("OK") { importError = nil }
@@ -124,26 +146,63 @@ struct SessionInboxView: View {
         return (formattedGB(km), "km")
     }
 
-    private func handlePhotoImport(_ result: Result<URL, Error>) {
-        switch result {
-        case .failure(let error):
-            importError = error.localizedDescription
-        case .success(let pickedURL):
-            guard pickedURL.startAccessingSecurityScopedResource() else {
-                importError = "Tidak bisa mengakses berkas yang dipilih."
+    /// Single completion handler for `showingImporter`, dispatched by whatever
+    /// `pendingImport` was set to right before the panel opened.
+    private func handleImport(_ result: Result<URL, Error>) {
+        switch pendingImport {
+        case .photo:
+            withSecurityScopedAccess(result) { pickedURL in
+                let staged = try Self.stagePhotoForWorker(pickedURL)
+                model.uploadImage(url: staged)
+            }
+        case .video:
+            withSecurityScopedAccess(result) { pickedURL in
+                let staged = try Self.stageVideoForWorker(pickedURL)
+                model.uploadVideo(url: staged)
+            }
+        case .videoForGPS:
+            // First half of the demo pairing: stage the video, then re-open the SAME
+            // importer for the companion CSV rather than uploading yet — the pairing
+            // only completes once that second pick resolves.
+            //
+            // ⚠️ The re-presentation is deferred a run-loop tick on purpose. Flipping
+            // `showingImporter` back to true synchronously, inside the completion
+            // handler SwiftUI is still calling to dismiss THIS SAME panel, was tried
+            // first and silently did nothing — SwiftUI hadn't yet finished applying
+            // `isPresented = false` from the dismissal, so the immediate `= true`
+            // collapsed into a no-op transition it never rendered. `DispatchQueue.
+            // main.async` lets that dismissal complete first.
+            withSecurityScopedAccess(result) { pickedURL in
+                let staged = try Self.stageVideoForWorker(pickedURL)
+                pendingImport = .gpsCSV(video: staged)
+                DispatchQueue.main.async {
+                    showingImporter = true
+                }
+            }
+        case .gpsCSV(let video):
+            // A cancelled/failed CSV pick is not an upload error — it just means
+            // this session proceeds without GPS, same as the plain "Video…" flow.
+            //
+            // `startImmediately: false` — unlike the plain "Video…" flow above,
+            // this one lands the session at `.readyToProcess` instead of
+            // auto-starting, specifically so "Putar kiri/kanan" in the session's
+            // own detail panel is reachable BEFORE processing burns through the
+            // clip. See `AppModel.uploadVideo`'s doc comment.
+            guard case .success(let pickedURL) = result,
+                  pickedURL.startAccessingSecurityScopedResource() else {
+                model.uploadVideo(url: video, startImmediately: false)
                 return
             }
             defer { pickedURL.stopAccessingSecurityScopedResource() }
-            do {
-                let staged = try Self.stagePhotoForWorker(pickedURL)
-                model.uploadImage(url: staged)
-            } catch {
-                importError = error.localizedDescription
-            }
+            model.uploadVideo(url: video, gpsCSVURL: pickedURL, startImmediately: false)
         }
     }
 
-    private func handleVideoImport(_ result: Result<URL, Error>) {
+    /// Shared security-scoped-access dance every import branch above needs: grant
+    /// access, run `body`, release access, and route any failure (including a
+    /// denied grant) into `importError` uniformly.
+    private func withSecurityScopedAccess(_ result: Result<URL, Error>,
+                                          _ body: (URL) throws -> Void) {
         switch result {
         case .failure(let error):
             importError = error.localizedDescription
@@ -154,8 +213,7 @@ struct SessionInboxView: View {
             }
             defer { pickedURL.stopAccessingSecurityScopedResource() }
             do {
-                let staged = try Self.stageVideoForWorker(pickedURL)
-                model.uploadVideo(url: staged)
+                try body(pickedURL)
             } catch {
                 importError = error.localizedDescription
             }
@@ -325,7 +383,16 @@ struct SessionInboxView: View {
     private func processBatch() {
         for index in model.sessions.indices where model.sessions[index].selectedForBatch {
             if case .readyToProcess = model.sessions[index].status {
-                model.startProcessing(sessionID: model.sessions[index].id)
+                // A "Video + GPS (demo)…" upload can sit at `.readyToProcess`
+                // too now (§ `AppModel.uploadVideo`'s `startImmediately` doc
+                // comment) — `startProcessing` would reject it for having no
+                // CloudKit surveyor zone, so route by session kind same as
+                // `SessionDetailPanel`'s "Proses sekarang".
+                if model.sessions[index].recordedDate != nil {
+                    model.startProcessing(sessionID: model.sessions[index].id)
+                } else {
+                    model.startManualVideoProcessing(sessionID: model.sessions[index].id)
+                }
             }
             model.sessions[index].selectedForBatch = false
         }

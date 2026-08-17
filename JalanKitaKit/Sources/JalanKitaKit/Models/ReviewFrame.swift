@@ -16,8 +16,10 @@ import CoreGraphics
 ///
 /// Every field here has a source on disk. Where one doesn't exist the field is
 /// optional and renders as "tidak tersedia" rather than carrying an invented
-/// value — `coordinate` / `gpsAccuracyM` are nil because `frames_provenance.csv`
-/// records `gps_source=none` with empty lat/lon for every extracted frame.
+/// value — `coordinate` is nil whenever the session's extraction had no GPS
+/// track to join (`frames_provenance.csv`'s `gps_source=none`), populated with
+/// a real `"lat,lon"` when it did (`RoadDamageFrameProvenance`). `gpsAccuracyM`
+/// stays nil always — no source on disk carries an accuracy figure yet.
 public struct ReviewFrame: Identifiable, Hashable, Codable, Sendable {
     public let id: String
 

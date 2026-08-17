@@ -79,6 +79,22 @@ final class AppModel {
         didSet { Self.saveRoadDamageFrames(roadDamageFrames) }
     }
 
+    /// A manual upload's own recording start, UTC — the `mvhd`/QuickTime creation
+    /// atom `RoadDamageVideoProcess.extract` already reads for every session
+    /// (`RoadDamageVideoManifest.createdUtc`), kept here under the session id so
+    /// `FindingsMapView` can place a *parking* candidate on the map too.
+    ///
+    /// A synced session doesn't need this — it has the real `session.recordedDate`
+    /// from the iPhone capture itself, which is more authoritative than anything
+    /// re-derived from a video container. This exists only because a manual
+    /// upload has no equivalent: `sessionRelativeSeconds` on its own is clip-time,
+    /// not wall-clock, and `ParkingAnalysis` carries no coordinate of its own to
+    /// skip that conversion (mirrors road damage's own GPS join, one layer up —
+    /// see `FindingsMapView`'s file header).
+    var manualUploadRecordingStart: [Session.ID: Date] = AppModel.loadManualUploadRecordingStart() {
+        didSet { Self.saveManualUploadRecordingStart(manualUploadRecordingStart) }
+    }
+
     /// Seconds between sampled frames for stage 3, as chosen in the review UI.
     ///
     /// Not persisted — it is a per-run choice, not a preference. The default is 5 s
@@ -279,10 +295,11 @@ final class AppModel {
         Set(sessions.map(\.surveyor.id)).count
     }
 
-    /// Sessions synced from an iPhone that haven't been started yet — see
-    /// `startProcessing`. A manual upload never sits in this state (it
-    /// starts immediately), so this is effectively "how many synced
-    /// sessions are waiting for a batch-process click."
+    /// Sessions waiting for a batch-process click without one yet — a synced
+    /// session that hasn't been started (see `startProcessing`), or a
+    /// "Video + GPS (demo)…" upload deferred the same way (see
+    /// `uploadVideo`'s `startImmediately` doc comment). Every other manual
+    /// upload still starts immediately and never sits in this state.
     var newSessionsCount: Int {
         sessions.filter { if case .readyToProcess = $0.status { return true }; return false }.count
     }
@@ -423,7 +440,23 @@ final class AppModel {
     /// one at a time — sequential, not concurrent, since both v13 and OFRSNet
     /// are already heavy single-process workloads and this is a first
     /// integration pass, not a throughput-tuned one.
-    func uploadVideo(url: URL) {
+    /// `gpsCSVURL`, when given, is a demo/testing companion track (`SessionInboxView`'s
+    /// "Video + GPS (demo)…" flow) — copied beside the video as `gps.csv` so
+    /// `runRoadDamageStage`'s `gpsCSVURL(sessionID:)` lookup finds it and each sampled
+    /// frame can carry a real interpolated coordinate. A plain `uploadVideo(url:)` call
+    /// (the existing "Video…" flow) is unaffected: no CSV, no copy, `coordinate` stays
+    /// nil exactly as it does today.
+    /// `startImmediately` exists for exactly one caller: "Video + GPS (demo)…"
+    /// passes `false` so the session lands at `.readyToProcess` instead of
+    /// starting the pipeline outright — same status a synced session sits in
+    /// before "Proses sekarang". Manual uploads never used to pause there, but
+    /// this one needs to: it's the only route that ends at "Putar kiri/kanan"
+    /// (`SessionDetailPanel`'s preview), and that control was unreachable
+    /// before this — the plain flow auto-started the pipeline and switched
+    /// `selection` to `.queue` in the same call, so the session's own detail
+    /// panel (where the rotate buttons live) was never actually visited. Every
+    /// existing caller keeps the old behavior via the default.
+    func uploadVideo(url: URL, gpsCSVURL: URL? = nil, startImmediately: Bool = true) {
         let sessionID = "video-\(UUID().uuidString.prefix(8))"
         // Copies out of the OS temp directory `SessionInboxView`'s
         // `.fileImporter` staged it into — that directory can be purged by
@@ -432,6 +465,9 @@ final class AppModel {
         // to the original staged URL if the copy fails; the pipeline can
         // still run against it this once, it just won't be replayable later.
         let durableURL = Self.copyToManualUploadsDir(sourceURL: url, sessionID: sessionID) ?? url
+        if let gpsCSVURL {
+            _ = Self.copyGPSCSVToManualUploadsDir(sourceURL: gpsCSVURL, sessionID: sessionID)
+        }
         let session = Session(
             id: sessionID,
             roadName: url.deletingPathExtension().lastPathComponent,
@@ -447,17 +483,53 @@ final class AppModel {
             gpsHz: nil,
             gpsGapNote: nil,
             sizeGB: Self.fileSizeGB(at: durableURL),
-            status: .segmenting(progress: 0),
+            status: startImmediately ? .segmenting(progress: 0) : .readyToProcess,
             segmentCount: nil,
             selectedForBatch: false
         )
         sessions.append(session)
+
+        // Captured NOW, unconditionally, regardless of `startImmediately` —
+        // before "Putar kiri/kanan" gets a chance to rotate this file and
+        // destroy its own creation timestamp. See
+        // `SessionVideoAssetBuilder.creationDate`'s doc comment for why the
+        // timing is load-bearing, not incidental.
+        Task {
+            if let date = await SessionVideoAssetBuilder.creationDate(of: durableURL) {
+                manualUploadRecordingStart[sessionID] = date
+            }
+        }
+
+        guard startImmediately else {
+            selection = .sessionInbox
+            return
+        }
+
         activeUploadSessionID = sessionID
         pipelineSteps[sessionID] = Self.videoPipelineSteps
         selection = .queue
-
         Task {
             await runVideoAnalysis(sessionID: sessionID, videoURL: durableURL)
+        }
+    }
+
+    /// `SessionDetailPanel`'s "Proses sekarang" for a manual-upload session
+    /// sitting at `.readyToProcess` — `startProcessing`'s manual-upload
+    /// counterpart. Can't reuse `startProcessing` itself: it requires a
+    /// CloudKit zone for the surveyor (`surveyorZones[session.surveyor.name]`),
+    /// which a manual/demo upload's placeholder `Self.operatorSurveyor` was
+    /// never registered under and never will be — that check exists for
+    /// pushing a synced session's result back to the right zone, meaningless
+    /// for a file that only ever lives on this Mac.
+    func startManualVideoProcessing(sessionID: Session.ID) {
+        guard let session = sessions.first(where: { $0.id == sessionID }),
+              let videoURL = SessionVideoAssetBuilder.clipURLs(for: session).first
+        else { return }
+        activeUploadSessionID = sessionID
+        pipelineSteps[sessionID] = Self.videoPipelineSteps
+        updateSessionStatus(sessionID, .segmenting(progress: 0))
+        Task {
+            await runVideoAnalysis(sessionID: sessionID, videoURL: videoURL)
         }
     }
 
@@ -872,12 +944,30 @@ final class AppModel {
                 intervalSec: roadDamageIntervalSeconds,
                 hashThreshold: roadDamageSkipDuplicates ? Self.duplicateHashThreshold : 0,
                 clipOffset: 0,
+                gpsCSV: Self.gpsCSVURL(sessionID: sessionID),
+                // nil for a synced session (never populated for one — see
+                // `manualUploadRecordingStart`'s doc comment), so Python falls
+                // back to reading the clip's own atom exactly as before.
+                createdUTCOverride: manualUploadRecordingStart[sessionID],
                 workDir: Self.roadDamageWorkDir(sessionID: sessionID),
                 onExtract: { [weak self] progress in
                     self?.pipelineSteps[sessionID]?[2].detail =
                         "mengambil frame \(progress.framesDone)/\(progress.framesTotal)"
                 },
                 onManifest: { [weak self] manifest in
+                    // Fallback only — `uploadVideo` already captures this via
+                    // AVFoundation at upload time, before a rotate can touch the
+                    // file (see `SessionVideoAssetBuilder.creationDate`'s doc
+                    // comment). Only fill in here when that capture is missing,
+                    // never overwrite it: by the time stage 3 runs, the file may
+                    // already have been rotated, and Python's own atom read at
+                    // THAT point would silently pick up the rotation's fresh
+                    // "now" timestamp instead of the real one.
+                    if self?.manualUploadRecordingStart[sessionID] == nil,
+                       let createdUtc = manifest.createdUtc,
+                       let date = Self.isoDateFormatter.date(from: createdUtc) {
+                        self?.manualUploadRecordingStart[sessionID] = date
+                    }
                     guard manifest.rejectedDup > 0 || manifest.rejectedBlur > 0 else { return }
                     self?.logLines[sessionID, default: []].insert(LogLine(
                         time: Self.logTimeFormatter.string(from: Date()),
@@ -923,6 +1013,11 @@ final class AppModel {
             time: Self.logTimeFormatter.string(from: Date()),
             message: "Kerusakan jalan: \(message)", isWarning: true), at: 0)
     }
+
+    /// Parses `RoadDamageVideoManifest.createdUtc` (`video_frames.py`'s own
+    /// `dt.isoformat().replace("+00:00", "Z")` — whole seconds, always `Z`, no
+    /// fractional part) into `manualUploadRecordingStart`.
+    private static let isoDateFormatter = ISO8601DateFormatter()
 
     /// `id_ID` throughout, so a 2,5 s interval reads with a comma like every other
     /// number in this app.
@@ -1053,6 +1148,37 @@ final class AppModel {
         }
     }
 
+    /// Sibling of `copyToManualUploadsDir`, fixed destination filename so
+    /// `gpsCSVURL(sessionID:)` and `RoadDamageFrameProvenance`'s Python
+    /// counterpart (`--gps-csv`) both know where to find it without the caller
+    /// threading a URL through every step.
+    private static func copyGPSCSVToManualUploadsDir(sourceURL: URL, sessionID: String) -> URL? {
+        let dir = manualUploadsDir(sessionID: sessionID)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let destination = dir.appendingPathComponent("gps.csv")
+        try? FileManager.default.removeItem(at: destination)
+        do {
+            try FileManager.default.copyItem(at: sourceURL, to: destination)
+            return destination
+        } catch {
+            return nil
+        }
+    }
+
+    /// A session's GPS track, if it has one — checked at road-damage-stage time so a
+    /// manually-uploaded demo video with a companion CSV (see `uploadVideo(url:gpsCSVURL:)`)
+    /// and a real synced session (whose `gps.csv` already lives in `syncedSessionsDir()`
+    /// for the route polyline, `SessionGPSTrackLoader`) both feed the same
+    /// `RoadDamageVideoProcess.extract(gpsCSV:)` parameter without the caller needing to
+    /// know which kind of session it has.
+    static func gpsCSVURL(sessionID: String) -> URL? {
+        let manual = manualUploadsDir(sessionID: sessionID).appendingPathComponent("gps.csv")
+        if FileManager.default.fileExists(atPath: manual.path) { return manual }
+        let synced = syncedSessionsDir().appendingPathComponent(sessionID, isDirectory: true)
+            .appendingPathComponent("gps.csv")
+        return FileManager.default.fileExists(atPath: synced.path) ? synced : nil
+    }
+
     /// `CKRecordZone.ID` isn't `Codable` — persisted as its two constituent
     /// strings instead.
     private struct PersistedZone: Codable {
@@ -1117,6 +1243,22 @@ final class AppModel {
     private static func saveRoadDamageFrames(_ frames: [Session.ID: [ReviewFrame]]) {
         guard let data = try? JSONEncoder().encode(frames) else { return }
         try? data.write(to: roadDamageFramesFileURL, options: .atomic)
+    }
+
+    private static var manualUploadRecordingStartFileURL: URL {
+        appSupportDir().appendingPathComponent("manual_upload_recording_start.json")
+    }
+
+    private static func loadManualUploadRecordingStart() -> [Session.ID: Date] {
+        guard let data = try? Data(contentsOf: manualUploadRecordingStartFileURL),
+              let dates = try? JSONDecoder().decode([Session.ID: Date].self, from: data)
+        else { return [:] }
+        return dates
+    }
+
+    private static func saveManualUploadRecordingStart(_ dates: [Session.ID: Date]) {
+        guard let data = try? JSONEncoder().encode(dates) else { return }
+        try? data.write(to: manualUploadRecordingStartFileURL, options: .atomic)
     }
 
     private static var manualUploadsPushedFileURL: URL { appSupportDir().appendingPathComponent("manual_uploads_pushed.json") }
