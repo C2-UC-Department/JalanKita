@@ -332,8 +332,9 @@ private struct DetectedVehicleOverlay: View {
 }
 
 /// Plain-AppKit `AVPlayerView`, not SwiftUI's `VideoPlayer` — see this
-/// file's header comment.
-private struct AVPlayerContainerView: NSViewRepresentable {
+/// file's header comment. Not private: `SessionDetailPanel`'s pre-processing
+/// preview reuses it too, same reasons.
+struct AVPlayerContainerView: NSViewRepresentable {
     let player: AVPlayer
 
     func makeNSView(context: Context) -> AVPlayerView {

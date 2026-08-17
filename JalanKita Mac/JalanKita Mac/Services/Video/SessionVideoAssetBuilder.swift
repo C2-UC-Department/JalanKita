@@ -41,4 +41,63 @@ enum SessionVideoAssetBuilder {
         guard let url = clipURLs(for: session).first else { return nil }
         return AVURLAsset(url: url)
     }
+
+    enum RotationError: LocalizedError {
+        case noVideo
+        case noVideoTrack
+        case exportFailed(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .noVideo: "Video sumber untuk sesi ini tidak ditemukan."
+            case .noVideoTrack: "Berkas ini tidak berisi trek video."
+            case .exportFailed(let reason): "Gagal memutar orientasi video: \(reason)"
+            }
+        }
+    }
+
+    /// Rotates the session's source video file in place, losslessly —
+    /// combines `degrees` with the track's existing `preferredTransform` and
+    /// remuxes with the `.passthrough` preset (metadata only, no pixel
+    /// re-encode), so this stays fast regardless of file size and never
+    /// touches picture quality. Every downstream reader of this file — the
+    /// Python pipelines' own orientation handling, this same preview,
+    /// "Simpan video…" — sees the corrected orientation with no separate
+    /// plumbing, because there's only ever the one file on disk.
+    static func rotateVideo(for session: Session, clockwiseDegrees degrees: Double) async throws {
+        guard let sourceURL = clipURLs(for: session).first else { throw RotationError.noVideo }
+        let asset = AVURLAsset(url: sourceURL)
+        guard let videoTrack = try await asset.loadTracks(withMediaType: .video).first else {
+            throw RotationError.noVideoTrack
+        }
+        let duration = try await asset.load(.duration)
+        let existingTransform = try await videoTrack.load(.preferredTransform)
+
+        let composition = AVMutableComposition()
+        guard let compVideoTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid)
+        else { throw RotationError.exportFailed("tidak bisa membuat trek video") }
+        try compVideoTrack.insertTimeRange(CMTimeRange(start: .zero, duration: duration), of: videoTrack, at: .zero)
+        let rotation = CGAffineTransform(rotationAngle: degrees * .pi / 180)
+        compVideoTrack.preferredTransform = existingTransform.concatenating(rotation)
+
+        if let audioTrack = try? await asset.loadTracks(withMediaType: .audio).first,
+           let compAudioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
+            try? compAudioTrack.insertTimeRange(CMTimeRange(start: .zero, duration: duration), of: audioTrack, at: .zero)
+        }
+
+        guard let exportSession = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetPassthrough) else {
+            throw RotationError.exportFailed("tidak bisa membuat sesi ekspor")
+        }
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("mov")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+        do {
+            try await exportSession.export(to: tempURL, as: .mov)
+        } catch {
+            throw RotationError.exportFailed(error.localizedDescription)
+        }
+
+        _ = try FileManager.default.replaceItemAt(sourceURL, withItemAt: tempURL)
+    }
 }

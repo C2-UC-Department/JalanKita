@@ -10,6 +10,7 @@
 //
 
 import AppKit
+import AVKit
 import SwiftUI
 import MapKit
 import UniformTypeIdentifiers
@@ -24,6 +25,10 @@ struct SessionDetailPanel: View {
     @State private var isExportingVideo = false
     @State private var isExportingGPS = false
     @State private var exportError: String?
+    @State private var player: AVPlayer?
+    @State private var isLoadingPreview = true
+    @State private var isRotating = false
+    @State private var rotationError: String?
 
     private var hasParkingResults: Bool {
         !(model.parkingAnalyses[session.id]?.isEmpty ?? true)
@@ -84,6 +89,8 @@ struct SessionDetailPanel: View {
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
+
+                videoPreview
 
                 if isSyncedSession {
                     SessionRouteMap(coordinates: coordinates)
@@ -167,6 +174,95 @@ struct SessionDetailPanel: View {
             Button("OK") { exportError = nil }
         } message: { message in
             Text(message)
+        }
+        .alert("Gagal memutar video", isPresented: .constant(rotationError != nil), presenting: rotationError) { _ in
+            Button("OK") { rotationError = nil }
+        } message: { message in
+            Text(message)
+        }
+    }
+
+    /// A quick look at the source footage before committing to "Proses
+    /// sekarang" — this is where a portrait-recorded clip (see
+    /// `CaptureSessionController`'s landscape lock, added after this class
+    /// of bug, but older synced sessions predate it) actually gets noticed,
+    /// so the rotate controls live right here rather than only in the
+    /// post-processing review screen.
+    @ViewBuilder
+    private var videoPreview: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ZStack {
+                if let player {
+                    AVPlayerContainerView(player: player)
+                } else if isLoadingPreview {
+                    ProgressView()
+                } else {
+                    ContentUnavailableView("Video tidak tersedia", systemImage: "video.slash")
+                        .scaleEffect(0.8)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .aspectRatio(16.0 / 9.0, contentMode: .fit)
+            .background(Color.black.opacity(0.05))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color(nsColor: .separatorColor)))
+            .overlay {
+                if isRotating {
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(.black.opacity(0.4))
+                        .overlay(ProgressView().controlSize(.small).tint(.white))
+                }
+            }
+
+            if player != nil {
+                HStack(spacing: 8) {
+                    Button {
+                        rotate(clockwiseDegrees: -90)
+                    } label: {
+                        Label("Putar kiri", systemImage: "rotate.left")
+                    }
+                    Button {
+                        rotate(clockwiseDegrees: 90)
+                    } label: {
+                        Label("Putar kanan", systemImage: "rotate.right")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(isRotating)
+            }
+        }
+        .task(id: session.id) {
+            await loadPreview()
+        }
+    }
+
+    private func loadPreview() async {
+        player = nil
+        isLoadingPreview = true
+        guard let asset = await SessionVideoAssetBuilder.buildPlayableAsset(for: session) else {
+            isLoadingPreview = false
+            return
+        }
+        player = AVPlayer(playerItem: AVPlayerItem(asset: asset))
+        isLoadingPreview = false
+    }
+
+    /// Rotates the file in place (see `SessionVideoAssetBuilder.rotateVideo`)
+    /// then rebuilds the player against it — `AVPlayer` doesn't notice an
+    /// in-place file replacement on its own, so the old `AVPlayerItem` would
+    /// otherwise keep showing the pre-rotation orientation.
+    private func rotate(clockwiseDegrees degrees: Double) {
+        isRotating = true
+        player?.pause()
+        Task {
+            do {
+                try await SessionVideoAssetBuilder.rotateVideo(for: session, clockwiseDegrees: degrees)
+                await loadPreview()
+            } catch {
+                rotationError = error.localizedDescription
+            }
+            isRotating = false
         }
     }
 
