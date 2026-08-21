@@ -1,0 +1,23 @@
+Copyright (c) 2026 the JalanKita team. All rights reserved.
+
+This repository and its contents (source code, models, documentation, and other
+materials) are the proprietary property of the copyright holder(s) named above.
+No license, express or implied, is granted to any person or entity to use, copy,
+modify, merge, publish, distribute, sublicense, host, or sell copies of this
+software or any portion of it, in source or compiled form, without prior written
+permission from the copyright holder(s).
+
+This is not an open-source license. If you have received access to this
+repository, that access does not by itself grant you any of the rights listed
+above — check with the copyright holder(s) before reusing anything in it.
+
+Third-party notice
+-------------------
+This repository bundles, depends on, or was trained using several third-party
+models, libraries, and datasets that are licensed separately from the terms
+above and remain subject to their own upstream licenses regardless of this
+notice. See THIRD_PARTY_NOTICES.md for the current list — in particular, the
+Ultralytics YOLO models used in CarDetection/ and RoadDamage/ are AGPL-3.0
+licensed (or require a paid Ultralytics Enterprise License for non-AGPL use),
+which has real implications for how this repository as a whole may be used or
+distributed.
