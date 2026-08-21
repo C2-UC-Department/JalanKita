@@ -21,6 +21,7 @@ lib/                          v5/v6/v8 signal code + v10 sign/coverage-zone code
                               dependency closure.
 depth/                        Depth-rate measurement (MiDaS backend + calibration).
 models/signs_crosswalk_v10_hardneg_r3_best.pt   Our own trained sign/crosswalk detector weights.
+                              Training data sources/attribution: DATA_SOURCES.md.
 yolov8n-seg.pt                 Stock Ultralytics vehicle detector/segmenter weights.
 requirements.txt               Inference-only dependencies (+ pyinstaller, for build_worker.sh).
 car_detection_worker.spec      PyInstaller spec for the onedir build.
